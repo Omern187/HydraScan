@@ -1,6 +1,6 @@
 # Code logic and operational bug review
 
-Read when the task includes functional bugs, code logic, incorrect behavior, broken features, or anything disrupting normal use. Strix findings are one input to security review; they do not replace this workflow or establish that the application works correctly.
+Read when the task includes functional bugs, code logic, incorrect behavior, broken features, or anything disrupting normal use. Backend findings are one input to security review; they do not replace this workflow or establish that the application works correctly.
 
 ## Establish what should work
 

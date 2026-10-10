@@ -81,11 +81,13 @@ Each accepted finding records the source/build, preconditions, expected versus o
 
 Important probes include out-of-order file loads, generated artifact inspection, failures hidden by success messages, special object keys, streamed Unicode, encoded identifiers, rejected imports and concurrent shared-file writes. Select probes that match the actual architecture. Passing existing tests does not clear untested failure paths, and a passing bug-demonstration script does not verify a fix.
 
-## Strix integration
+## Security backend
 
-HydraScan optionally uses [Strix](https://github.com/usestrix/strix) for authorized security testing. Strix installation, Docker, provider configuration and any paid-run budget are separate prerequisites. HydraScan does not bundle or automatically install the engine, purchase credits, or upload source to a cloud scanner.
+Use HydraScan as the entrypoint for the whole assessment. Its reviewers examine code and application behavior, and its coordinator can invoke a configured security-testing backend and validate the resulting evidence in the same report.
 
-The integration records the inspected upstream revision and explains isolated execution, artifact interpretation, coverage limitations and resume behavior. See [Strix integration and provenance](skills/hydrascan/references/strix.md).
+The current package is an agent skill with backend execution instructions. It does not yet contain a runtime adapter or a bundled engine. Installing the skill alone does not install or automatically start a scanner. Backend execution requires the documented dependencies, provider configuration and an established run budget.
+
+See [backend execution and setup](skills/hydrascan/references/engine.md) for the supported engine, isolation, artifact interpretation and continuation rules.
 
 ## Repository contents
 
@@ -100,15 +102,15 @@ skills/hydrascan/
     functional-bugs.md
     multi-agent-review.md
     reporting.md
-    strix.md
+    engine.md
 ```
 
-This repository contains reusable review instructions and UI metadata. Private application reports, credentials, generated application binaries and the Strix engine are not included.
+This repository contains reusable review instructions and UI metadata. Private application reports, credentials, generated application binaries and engine executables are not included.
 
-## Scope and attribution
+## Scope
 
 Active testing uses the established authorized targets and effects, preferably disposable local instances or staging with synthetic data. A review request does not authorize production changes, additional hosts, paid/cloud runs or external reporting. The final report states actual coverage and remaining gaps; HydraScan does not guarantee discovery of every vulnerability or certify compliance.
 
-HydraScan is an independent adaptation of the [Strix](https://github.com/usestrix/strix) workflow, with additional functional probes, complementary-agent coordination and resumable review records. It is not an official Strix distribution. Upstream Strix is Apache-2.0 licensed; upstream executables and full skill packs are not bundled. The inspected upstream commit is preserved in the skill metadata and provenance reference.
+Upstream credits, the inspected source revision and engine licensing are preserved in the [technical provenance reference](skills/hydrascan/references/engine.md#basis-for-this-skill). HydraScan adds functional probes, complementary-agent coordination and resumable review records.
 
-Current workflow revision: **2026-10-10.5**.
+Current workflow revision: **2026-10-10.6**.

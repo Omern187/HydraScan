@@ -1,4 +1,10 @@
-# Strix engine integration and provenance
+# Security backend execution and provenance
+
+## Integration status
+
+HydraScan is the user-facing review workflow. Strix is its supported optional security-testing backend; the host agent invokes the installed CLI and incorporates its artifacts into the same assessment. Functional reviewers and independent validation remain part of HydraScan.
+
+This repository supplies the integration instructions. It does not currently contain a runtime adapter, bundled engine, or automatic dependency installer. Installing the HydraScan skill alone does not install or start the backend. When backend prerequisites are missing, continue applicable source and functional checks, and report engine execution as unperformed.
 
 ## Basis for this skill
 

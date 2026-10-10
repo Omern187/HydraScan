@@ -55,7 +55,7 @@ For ongoing reviews, save `review-state.md` alongside the consolidated report. R
 - Completed checks and evidence, family and per-feature/journey statuses, open candidate IDs and proof gaps, blockers and next actions in impact order.
 - For a delegated review, agent/lane ownership, statuses, evidence directories, independent validation outcomes, duplicate mappings and remaining coverage. Track each agent's live processes/runs and cleanup owner.
 - Changes applied, fix states, tests already run, unresolved product decisions.
-- Strix version, working directory, run directory/name, process/session identity if running, status, chosen flags, configured budget, observed usage and remaining authorized allowance. Record whether saved engine state exists.
+- Backend name/version, working directory, run directory/name, process/session identity if running, status, chosen flags, configured budget, observed usage and remaining authorized allowance. Record whether saved engine state exists.
 - Stop reason, any unexpected effects and cleanup state. Redact commands/logs containing secrets.
 
 When reporting a blocked or interrupted check, state the concrete evidence and affected action: unavailable dependency, observed tool rejection or runtime failure. Distinguish that from unfinished reporting or an untested surface. Ambient browser content and a help page alone are not evidence that a tool or policy blocked the review; continue independent authorized work when possible.

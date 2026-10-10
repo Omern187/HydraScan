@@ -50,7 +50,7 @@ Do not embed secret values; use approved access references. Include the context 
 ## Isolate effects and coordinate dependencies
 
 - Use private test data, scratch directories, ports, browser contexts and databases per agent. Shared source is read-only during review. If an authorized test must share mutable state, serialize those checks or explicitly coordinate the intended bounded concurrency; accidental test interference is not a product finding.
-- Keep one owner for a paid scanner run or other shared operation. Do not allow agents to launch duplicate Strix runs, install conflicting dependencies, spend beyond the existing budget or widen targets independently.
+- Keep one owner for a paid scanner run or other shared operation. Do not allow agents to launch duplicate backend runs, install conflicting dependencies, spend beyond the existing budget or widen targets independently.
 - Each agent cleans up only its own resources and returns process/run identities if work remains active. Do not stop another agent's process by broad name matching.
 - Where available, use the host's subagent tools, rather than creating user-owned chats for internal review. Reuse idle reviewers for follow-up checks instead of growing an unbounded tree. A lane assignment does not require nested delegation.
 - Continue useful coordinator work while agents run: inventory, uncovered families, source/build checks and evidence review. Track changed progress, avoid repeated unchanged polling, and communicate meaningful findings or gaps to the user.
