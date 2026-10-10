@@ -67,6 +67,8 @@ A static match is a `candidate`, not a confirmed vulnerability. A successful pro
 
 Every JavaScript/TypeScript/markup source gets a lexical-analysis gap. Regex literals, nested template interpolation and escaped embedded-script strings may produce missed or spurious candidates. Vue/Svelte scanning covers script elements; framework markup expressions require host review. HTML comments, inert script types, attributes and template-contained scripts are excluded from executable-script triage. These exclusions do not establish that subsequent runtime insertion or transformation is safe.
 
+Python object-access candidates add a local request-ID -> lookup -> return/send trace, schema observation and narrow same-object control checks. They do not prove record sensitivity or ineffective middleware/database policy. Read [security-validation.md](security-validation.md) before accepting them. Python candidate/task IDs include the AST call column so separate operations on one line remain distinct. Older run IDs can differ; correlate pinned path, line, column and rule when comparing revisions. Columns are one-based AST byte offsets.
+
 Keep confirmed finding records using [reporting.md](reporting.md), including legitimate controls, source/build, substitutions and remaining proof gaps. Use [coverage.md](coverage.md) to assign unfinished families and [multi-agent-review.md](multi-agent-review.md) to coordinate reviewers. Keep raw logs private; generated reports may contain source paths and snippets and need review before publication.
 
 ## Continue and refresh

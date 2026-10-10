@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-VERSION = "2026-10-10.8"
+VERSION = "2026-10-10.9"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hydrascan_source import inspect_python, inspect_javascript
@@ -116,7 +116,7 @@ def analyze(root, files):
 
     def add(path, signal):
         line, rule = signal['line'], signal['rule']
-        identity = f"{path}:{line}:{rule}"
+        identity = f"{path}:{line}:{signal.get('column', '')}:{rule}"
         candidates.append({"id": "HS-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
                            **signal, "path": path, "kind": "security", "proof_state": "candidate",
                            "proof_gap": "Establish reachable input, effective controls and actual impact; a source signal alone is not a vulnerability."})
@@ -130,7 +130,7 @@ def analyze(root, files):
             try:
                 signals, tasks = inspect_python(text)
                 for task in tasks:
-                    identity = f"{path}:{task['line']}:{task['rule']}"
+                    identity = f"{path}:{task['line']}:{task.get('column', '')}:{task['rule']}"
                     review_tasks.append({"id": "HR-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
                                          "path": path, "kind": "review-task", **task})
             except SyntaxError as error:

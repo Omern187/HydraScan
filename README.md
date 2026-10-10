@@ -109,7 +109,7 @@ Important probes include out-of-order file loads, generated artifact inspection,
 
 ## What the runner establishes
 
-Local Python assignment-flow and JavaScript/TypeScript/HTML lexical signals are candidates requiring review of reachability, controls and impact. Triage includes composed queries, variable path segments, TAR extraction, evaluator aliases and outbound URL calls. Ownership/tenant questions are saved separately in `security-review-tasks.json`; they require semantic review and controlled role comparisons. Comments and constant HTML are distinguished from executable/user-derived sinks in the recognized source forms. See [cybersecurity validation](skills/hydrascan/references/security-validation.md). Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
+Local Python assignment-flow and JavaScript/TypeScript/HTML lexical signals are candidates requiring review of reachability, controls and impact. Triage includes composed queries, variable path segments, TAR extraction, evaluator aliases and outbound URL calls. Python object-access triage follows a request-selected record to its return/send, records input/lookup/disclosure locations and distinguishes narrow owner controls from misleading checks. Unknown schema, sharing intent and external policy remain proof gaps. Lookups without the demonstrated disclosure flow stay separate questions in `security-review-tasks.json`. Comments and constant HTML are distinguished from executable/user-derived sinks in the recognized source forms. See [cybersecurity validation](skills/hydrascan/references/security-validation.md). Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
 
 The text snapshot excludes symlinks, dependency/Git directories, known secret files, binaries and oversized files. Inspect the inventory for actual exclusions. Those omissions, missing runtime artifacts and untested deployed builds remain coverage gaps. Filename filtering does not guarantee that included code contains no secrets; inspect and redact reports and keep raw logs private.
 
@@ -137,6 +137,9 @@ tests/
   test_native_runner.py
   test_source_review.py
   test_source_regressions.py
+  test_authorization_flow.py
+  test_authorization_regressions.py
+  fixtures/
 ```
 
 This repository contains the native runner, source triage, review instructions, UI metadata and regression tests. Private application reports, credentials and generated application binaries are not included.
@@ -155,4 +158,4 @@ Active testing uses the established authorized targets and effects, preferably d
 
 Historical inspiration and upstream credits are preserved in the [provenance reference](skills/hydrascan/references/provenance.md). They are not runtime dependencies. HydraScan has its own runner, functional probes, complementary-agent coordination and resumable review records.
 
-Current workflow revision: **2026-10-10.8**.
+Current workflow revision: **2026-10-10.9**.

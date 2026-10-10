@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "scope": "Independent inert Python source fixtures for object authorization triage. Source is parsed only, never imported, compiled, or executed.",
+  "shared_expectations": {
+    "maximum_claim": "candidate source evidence or an open review question; never a confirmed vulnerability",
+    "must_not_claim": ["confirmed vulnerability", "verified exploit", "demonstrated unauthorized disclosure", "absence of all application authorization"],
+    "proof_gaps": ["route reachability", "effective middleware and database policies", "object sensitivity and intended sharing", "principal and tenancy semantics"]
+  },
+  "cases": [
+    {
+      "id": "request_id_sql_response",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "absent_in_local_source",
+        "evidence": ["request.args.get('record_id')", "SELECT * FROM records WHERE id = ?", "return jsonify(dict(row))"],
+        "review_questions": ["Does application-level authorization or a database policy constrain the requested record to this principal?", "Are records private or deliberately shared?"]
+      }
+    },
+    {
+      "id": "owner_scoped_lookup",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ? AND owner_id = ?', (record_id, current_user.id)).fetchone()\n    if row is None:\n        abort(404)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "guarded_source_path",
+        "candidate_expected": false,
+        "guard_status": "principal_constraint_in_exact_lookup",
+        "evidence": ["owner_id = ?", "(record_id, current_user.id)", "return jsonify(dict(row))"],
+        "review_questions": ["Is current_user.id the trusted principal and is owner_id the intended access policy?"]
+      }
+    },
+    {
+      "id": "owner_check_before_response",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    if row is None:\n        abort(404)\n    if row['owner_id'] != current_user.id:\n        abort(403)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "guarded_source_path",
+        "candidate_expected": false,
+        "guard_status": "same_object_terminating_guard_before_disclosure",
+        "evidence": ["row['owner_id'] != current_user.id", "abort(403)", "return jsonify(dict(row))"],
+        "review_questions": ["Does abort terminate the route and does ownership grant access to the returned fields?"]
+      }
+    },
+    {
+      "id": "owner_check_after_return",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n    if row['owner_id'] != current_user.id:\n        abort(403)\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "guard_after_unconditional_return_is_not_counterevidence",
+        "evidence": ["return jsonify(dict(row))", "row['owner_id'] != current_user.id", "abort(403)"],
+        "review_questions": ["What effective authorization precedes this disclosure path?"],
+        "must_not_infer": ["The presence of owner_id or abort anywhere in the function clears the candidate."]
+      }
+    },
+    {
+      "id": "check_after_response_construction_before_return",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    response = jsonify(dict(row))\n    if row['owner_id'] != current_user.id:\n        abort(403)\n    return response\n",
+      "expectation": {
+        "assessment": "guarded_source_path",
+        "candidate_expected": false,
+        "guard_status": "guard_after_construction_but_before_return",
+        "evidence": ["response = jsonify(dict(row))", "abort(403)", "return response"],
+        "review_questions": ["Does response construction have externally observable side effects, and does abort terminate this route?"],
+        "must_not_infer": ["Constructing a response object by itself proves disclosure occurred."]
+      }
+    },
+    {
+      "id": "wrong_object_guard",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    profile = db.execute('SELECT * FROM profiles WHERE owner_id = ?', (current_user.id,)).fetchone()\n    if profile['owner_id'] != current_user.id:\n        abort(403)\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "guard_targets_other_object",
+        "evidence": ["profile['owner_id'] != current_user.id", "SELECT * FROM records WHERE id = ?", "return jsonify(dict(row))"],
+        "review_questions": ["What connects authorization of profile to access to the requested record?"],
+        "must_not_infer": ["An owner check on profile establishes ownership of row."]
+      }
+    },
+    {
+      "id": "conditional_guard_bypass_path",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    if request.args.get('check_owner') == '1':\n        if row['owner_id'] != current_user.id:\n            abort(403)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "request_conditioned_guard_does_not_cover_all_paths",
+        "evidence": ["request.args.get('check_owner') == '1'", "row['owner_id'] != current_user.id", "return jsonify(dict(row))"],
+        "review_questions": ["Is the unchecked branch reachable and what authorization protects it?"],
+        "must_not_infer": ["A nested owner check dominates the unconditional response."]
+      }
+    },
+    {
+      "id": "non_terminating_owner_check",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    if row['owner_id'] != current_user.id:\n        logger.warning('owner mismatch')\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "comparison_without_access_block",
+        "evidence": ["row['owner_id'] != current_user.id", "logger.warning('owner mismatch')", "return jsonify(dict(row))"],
+        "review_questions": ["What control actually blocks unauthorized disclosure on this path?"],
+        "must_not_infer": ["Merely comparing ownership authorizes or rejects access."]
+      }
+    },
+    {
+      "id": "public_table_name_only",
+      "source": "from flask import request, jsonify\n\n@app.get('/articles')\ndef article():\n    article_id = request.args.get('article_id')\n    row = db.execute('SELECT * FROM public_articles WHERE id = ?', (article_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "context_review_only",
+        "candidate_expected": null,
+        "guard_status": "public_naming_is_context_not_proven_policy",
+        "evidence": ["public_articles", "request.args.get('article_id')", "return jsonify(dict(row))"],
+        "review_questions": ["Are all public_articles rows and returned fields intended to be public, including drafts or internal fields?"],
+        "must_not_infer": ["The table name proves a vulnerability.", "The table name proves all records are safe to disclose."]
+      }
+    },
+    {
+      "id": "shared_object_explicit_scope",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ? AND (owner_id = ? OR is_public = 1)', (record_id, current_user.id)).fetchone()\n    if row is None:\n        abort(404)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "guarded_source_path",
+        "candidate_expected": false,
+        "guard_status": "explicit_owner_or_public_scope_in_exact_lookup",
+        "evidence": ["(owner_id = ? OR is_public = 1)", "(record_id, current_user.id)", "return jsonify(dict(row))"],
+        "review_questions": ["Does is_public intentionally permit access to every returned field?"]
+      }
+    },
+    {
+      "id": "unknown_authorization_middleware",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\n@authorize_record\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "unknown_decorator_requires_review",
+        "evidence": ["@authorize_record", "SELECT * FROM records WHERE id = ?", "return jsonify(dict(row))"],
+        "review_questions": ["Does authorize_record enforce access to the same record_id and fail closed before this handler returns?"],
+        "must_not_infer": ["The decorator name proves authorization is effective.", "Authorization middleware is absent."]
+      }
+    },
+    {
+      "id": "authentication_only",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\n@login_required\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "authentication_visible_object_scope_unverified",
+        "evidence": ["@login_required", "SELECT * FROM records WHERE id = ?", "return jsonify(dict(row))"],
+        "review_questions": ["How is access to this particular record authorized for the authenticated principal?"],
+        "must_not_infer": ["Authentication alone proves per-object authorization."]
+      }
+    },
+    {
+      "id": "owner_scope_bound_to_request_value",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    owner_id = request.args.get('owner_id')\n    row = db.execute('SELECT * FROM records WHERE id = ? AND owner_id = ?', (record_id, owner_id)).fetchone()\n    if row is None:\n        abort(404)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "owner_predicate_bound_to_untrusted_request",
+        "evidence": ["owner_id = request.args.get('owner_id')", "(record_id, owner_id)", "return jsonify(dict(row))"],
+        "review_questions": ["Is this owner_id independently bound to the authenticated principal?"],
+        "must_not_infer": ["The presence of owner_id in SQL proves a principal-scoped lookup."]
+      }
+    },
+    {
+      "id": "existence_check_is_not_owner_check",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    if row is None:\n        abort(404)\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "existence_guard_only",
+        "evidence": ["if row is None", "abort(404)", "return jsonify(dict(row))"],
+        "review_questions": ["What establishes the principal's right to access the existing record?"],
+        "must_not_infer": ["A missing-object rejection establishes per-object authorization."]
+      }
+    }
+  ]
+}

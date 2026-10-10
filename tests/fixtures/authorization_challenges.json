@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "scope": "Implementation-informed follow-up challenges; not part of the frozen independent case set. Fixture source remains inert.",
+  "cases": [
+    {
+      "id": "shadowed_current_user_is_request_controlled",
+      "source": "from flask import request, jsonify\nfrom types import SimpleNamespace\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    current_user = SimpleNamespace(id=request.args.get('owner_id'))\n    row = db.execute('SELECT * FROM records WHERE id = ? AND owner_id = ?', (record_id, current_user.id)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "principal_name_shadowed_by_request_controlled_value",
+        "evidence": ["current_user = SimpleNamespace(id=request.args.get('owner_id'))", "(record_id, current_user.id)", "return jsonify(dict(row))"],
+        "review_questions": ["What trusted principal actually constrains the lookup?"],
+        "must_not_infer": ["The spelling current_user.id establishes trusted principal provenance despite local rebinding."]
+      }
+    },
+    {
+      "id": "computed_owner_is_not_exact_principal",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    owner_id = current_user.id + int(request.args.get('offset'))\n    row = db.execute('SELECT * FROM records WHERE id = ? AND owner_id = ?', (record_id, owner_id)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "principal_transformed_with_request_controlled_offset",
+        "evidence": ["owner_id = current_user.id + int(request.args.get('offset'))", "(record_id, owner_id)", "return jsonify(dict(row))"],
+        "review_questions": ["Can the caller select a different owner's identifier through offset?"],
+        "must_not_infer": ["Any expression containing a principal is the same trusted principal."]
+      }
+    },
+    {
+      "id": "negated_owner_sql_predicate",
+      "source": "from flask import request, jsonify\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ? AND NOT owner_id = ?', (record_id, current_user.id)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "owner_predicate_is_negated",
+        "evidence": ["AND NOT owner_id = ?", "(record_id, current_user.id)", "return jsonify(dict(row))"],
+        "review_questions": ["What access policy justifies selecting records whose owner differs from the principal?"],
+        "must_not_infer": ["An owner equality text match inside a NOT predicate scopes access to the principal."]
+      }
+    },
+    {
+      "id": "owner_field_rewritten_before_check",
+      "source": "from flask import request, jsonify, abort\n\n@app.get('/records')\ndef record():\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    row = dict(row)\n    row['owner_id'] = current_user.id\n    if row['owner_id'] != current_user.id:\n        abort(403)\n    return jsonify(row)\n",
+      "expectation": {
+        "assessment": "candidate",
+        "candidate_expected": true,
+        "guard_status": "owner_field_overwritten_before_comparison",
+        "evidence": ["row['owner_id'] = current_user.id", "if row['owner_id'] != current_user.id", "return jsonify(row)"],
+        "review_questions": ["What checks the fetched record's original owner before its data is returned?"],
+        "must_not_infer": ["Comparing an overwritten owner field verifies the original record's ownership."]
+      }
+    },
+    {
+      "id": "local_request_name_has_trusted_literal_input",
+      "source": "from flask import jsonify\nfrom types import SimpleNamespace\n\n@app.get('/records')\ndef record():\n    request = SimpleNamespace(args={'record_id': 'fixed-public-example'})\n    record_id = request.args.get('record_id')\n    row = db.execute('SELECT * FROM records WHERE id = ?', (record_id,)).fetchone()\n    return jsonify(dict(row))\n",
+      "expectation": {
+        "assessment": "context_review_only",
+        "candidate_expected": false,
+        "guard_status": "request_name_locally_rebound_to_literal_data",
+        "evidence": ["request = SimpleNamespace(args={'record_id': 'fixed-public-example'})", "request.args.get('record_id')", "return jsonify(dict(row))"],
+        "review_questions": ["Does the fixed record require access control despite this caller-independent selection?"],
+        "must_not_infer": ["The local spelling request.args proves caller-controlled provenance."]
+      }
+    }
+  ]
+}

@@ -28,11 +28,21 @@ def inspect_python(text):
     """
     tree = ast.parse(text)
     signals, tasks, seen = [], [], set()
+    owned_tables, lookups = {}, {}
+    ownership = {'owner', 'owner_id', 'user_id', 'tenant_id', 'account_id'}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and name_of(node.func).endswith('.execute') and node.args and isinstance(node.args[0], ast.Constant):
+            schema = node.args[0].value
+            match = re.fullmatch(r'\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\((.*)\)\s*;?\s*', schema, re.I | re.S) if isinstance(schema, str) else None
+            if match:
+                columns = {item.strip().split()[0].strip('"`[]').lower() for item in match[2].split(',') if item.strip()}
+                if columns & ownership:
+                    owned_tables[match[1].lower()] = columns & ownership
 
     def emit(node, rule, title, family, detail):
-        key = (node.lineno, rule)
+        key = (node.lineno, node.col_offset, rule)
         if key not in seen:
-            signals.append({"line": node.lineno, "rule": rule, "title": title, "family": family,
+            signals.append({"line": node.lineno, "column": node.col_offset + 1, "rule": rule, "title": title, "family": family,
                             "method": "Python AST and local assignment flow", "detail": detail})
             seen.add(key)
 
@@ -44,6 +54,8 @@ def inspect_python(text):
         return env.get(first, {}).get("call", first) + (dot + rest if dot else "")
 
     def facts(node, env):
+        if node is None:
+            return {}
         if isinstance(node, ast.Name):
             return dict(env.get(node.id, {"dynamic": True, "call": node.id}))
         if isinstance(node, ast.Constant):
@@ -51,10 +63,48 @@ def inspect_python(text):
         if isinstance(node, ast.NamedExpr):
             return facts(node.value, env)
         if isinstance(node, ast.Attribute):
-            return {**facts(node.value, env), "call": binding(node, env)}
+            base = facts(node.value, env)
+            result = {**base, "call": binding(node, env), 'owner_access': set()}
+            root = name_of(node).split('.')[0]
+            external = root not in env or env[root].get('parameter') or env[root].get('request_source')
+            if (external and name_of(node) in {'self.path', 'request.path', 'request.args', 'request.GET', 'request.query_params', 'request.path_params', 'request.json'}
+                    or binding(node, env) in {'flask.request.path', 'flask.request.args', 'flask.request.json', 'flask.request.GET'}):
+                result.update(request_input=True, input_line=node.lineno)
+            if (external and name_of(node) == 'request.user' or root not in env and name_of(node) in {'current_user.id', 'current_user.pk', 'current_user.tenant_id'}
+                    or base.get('principal') and node.attr in {'id', 'pk', 'tenant_id', 'account_id'}):
+                result['principal'] = True
+            else:
+                result['principal'] = False
+            if node.attr.lower() in ownership and base.get('direct_objects'):
+                result['owner_access'] = {(location, node.attr.lower()) for location in base['direct_objects']}
+                result['direct_objects'] = set()
+            return result
+        if isinstance(node, ast.Subscript):
+            base = facts(node.value, env)
+            index = facts(node.slice, env)
+            result = {**base, 'call': '', 'owner_access': set(), 'direct_objects': set(), 'principal': bool(base.get('principal') and index.get('literal') in {'id', 'pk', 'tenant_id', 'account_id'})}
+            if index.get('literal') in ownership and base.get('direct_objects'):
+                result['owner_access'] = {(location, index['literal']) for location in base['direct_objects']}
+            return result
         if isinstance(node, ast.Call):
             target = binding(node.func, env)
             values = [facts(value, env) for value in node.args] + [facts(value.value, env) for value in node.keywords]
+            receiver = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
+            flow = combine_flow(values + [receiver])
+            if isinstance(node.func, ast.Attribute) and node.func.attr == 'get' and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'Authorization':
+                flow['auth_token'] = True
+            if name_of(node.func).lower().endswith(('sessions.get', 'session_users.get')) and flow.get('auth_token'):
+                flow['principal'] = True
+            lookup = query_lookup(node, env)
+            if lookup:
+                location = (node.lineno, node.col_offset)
+                lookups[location] = lookup
+                flow['objects'] = flow['direct_objects'] = {location}
+                flow['owner_access'] = set()
+            elif target.endswith('.fetchone'):
+                flow['direct_objects'] = set(receiver.get('direct_objects', set()))
+            elif target == 'dict' and len(values) == 1 and not node.keywords:
+                flow['direct_objects'] = set(values[0].get('direct_objects', set()))
             if target == "tarfile.open":
                 return {"dynamic": False, "call": "", "tar": True}
             if target in {"pathlib.Path", "Path", "os.path.join"} or target.endswith((".joinpath", ".resolve", ".absolute")):
@@ -68,17 +118,147 @@ def inspect_python(text):
                 receiver = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
                 return {"dynamic": receiver.get("dynamic", False) or any(value.get("dynamic") for value in values), "composed": True, "call": ""}
             # Safe literal conversion is not evidence for string/query/path containment.
-            return {"dynamic": True, "call": ""}
+            return {**flow, "dynamic": True, "call": ""}
         children = [facts(child, env) for child in ast.iter_child_nodes(node) if isinstance(child, ast.expr)]
         path_base = facts(node.left, env) if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else {}
-        return {"dynamic": any(child.get("dynamic") for child in children), "call": "",
+        flow = combine_flow(children)
+        if isinstance(node, ast.Compare) or isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            flow['objects'] = set()  # A boolean result is not the fetched record.
+        return {**flow, "dynamic": any(child.get("dynamic") for child in children), "call": "",
+                "elements": children if isinstance(node, (ast.Tuple, ast.List)) else None,
                 "composed": isinstance(node, (ast.JoinedStr, ast.BinOp)),
                 "path": isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div),
                 "path_root": ast.dump(node.left) if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else None,
                 "path_segment_dynamic": path_base.get('path_segment_dynamic', False) or facts(node.right, env).get("dynamic") if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else False}
 
+    def combine_flow(values):
+        result = {key: any(value.get(key) for value in values) for key in ('request_input', 'auth_token')}
+        # Containing a principal is not the same as being that exact principal.
+        result['principal'] = False
+        for key in ('objects', 'tampered_objects'):
+            result[key] = set().union(*(value.get(key, set()) for value in values))
+        result['owner_access'] = set()
+        lines = [value['input_line'] for value in values if value.get('input_line')]
+        if lines:
+            result['input_line'] = min(lines)
+        return result
+
+    def query_lookup(node, env):
+        if not binding(node.func, env).endswith('.execute'):
+            return None
+        keywords = {item.arg: item.value for item in node.keywords if item.arg}
+        query_node = node.args[0] if node.args else keywords.get('query', keywords.get('sql'))
+        raw = facts(query_node, env).get('literal')
+        if not isinstance(raw, str):
+            return None
+        match = re.match(r'\s*SELECT\b.*?\bFROM\s+(\w+)\b.*?\bWHERE\b(.*)', raw, re.I | re.S)
+        if not match:
+            return None
+        where = match[2]
+        params_node = node.args[1] if len(node.args) > 1 else keywords.get('parameters', keywords.get('params'))
+        params = facts(params_node, env).get('elements') or []
+        id_match = re.search(r'\b(?:id|pk)\s*=\s*\?', where, re.I)
+        if not id_match:
+            return None
+        position = where[:id_match.end()].count('?') - 1
+        if position >= len(params) or not params[position].get('request_input'):
+            return None
+        fields = owned_tables.get(match[1].lower(), ownership)
+        scoped = False
+        # Accept only a flat conjunction with a bound principal; OR and nested
+        # predicate expressions require review rather than a guessed guarantee.
+        simple = not re.search(r'\b(?:OR|NOT)\b|[()\'\"]|--|/\*', where, re.I)
+        shared = re.fullmatch(r'\s*(?:id|pk)\s*=\s*\?\s+AND\s*\(\s*(?:owner|owner_id|user_id|tenant_id|account_id)\s*=\s*\?\s+OR\s+is_public\s*=\s*1\s*\)\s*;?\s*', where, re.I)
+        if simple or shared:
+            delimiter = r'(?:OR\b)' if shared else r'(?:AND\b|$|;)'
+            for owner in re.finditer(r'\b(' + '|'.join(sorted(fields)) + r')\s*=\s*\?(?=\s*' + delimiter + ')', where, re.I):
+                bound = where[:owner.end()].count('?') - 1
+                scoped |= bound < len(params) and bool(params[bound].get('principal')) and not params[bound].get('request_input')
+        return {'node': node, 'table': match[1].lower(), 'fields': fields, 'scoped': scoped, 'declared_owner': match[1].lower() in owned_tables,
+                'input_line': params[position].get('input_line')}
+
+    def object_guard(test, env, operator):
+        if not isinstance(test, ast.Compare) or len(test.ops) != 1 or not isinstance(test.ops[0], operator):
+            return set()
+        left, right = facts(test.left, env), facts(test.comparators[0], env)
+        owners = left.get('owner_access', set()) if right.get('principal') and not right.get('request_input') else right.get('owner_access', set()) if left.get('principal') and not left.get('request_input') else set()
+        tampered = left.get('tampered_objects', set()) | right.get('tampered_objects', set())
+        return {('object', location) for location, field in owners if location not in tampered and field in lookups.get(location, {}).get('fields', set())}
+
+    def disclosure(expression, env, guarded, authenticated):
+        if not authenticated:
+            return
+        flow = facts(expression, env)
+        for location in flow.get('objects', set()):
+            lookup = lookups[location]
+            if lookup['scoped'] or ('object', location) in guarded and location not in flow.get('tampered_objects', set()):
+                continue
+            emit(lookup['node'], 'python-object-authorization', 'Request-selected owned record reaches a return without a visible object guard', AUTH,
+                 'Request-derived ID selects a record and its result reaches a return. Establish route exposure, middleware/database policy, record sensitivity, sharing intent and actual cross-identity effect before confirmation.')
+            item = next(item for item in signals if (item['line'], item['column'] - 1) == location and item['rule'] == 'python-object-authorization')
+            item['evidence_lines'] = {'input': lookup['input_line'], 'lookup': location[0], 'disclosure': expression.lineno}
+            item['table'] = lookup['table']
+            item['ownership_schema_observed'] = lookup['declared_owner']
+            if not lookup['declared_owner']:
+                item['title'] = 'Request-selected record reaches a return; object access policy requires review'
+
+    def terminates(statements, env):
+        return any(isinstance(item, (ast.Return, ast.Raise)) or isinstance(item, ast.Expr) and isinstance(item.value, ast.Call)
+                   and binding(item.value.func, env) == 'flask.abort' and item.value.args
+                   and isinstance(item.value.args[0], ast.Constant) and item.value.args[0].value in {401, 403, 404}
+                   for item in statements)
+
     def parameters(arguments):
         return arguments.posonlyargs + arguments.args + arguments.kwonlyargs + [x for x in (arguments.vararg, arguments.kwarg) if x]
+
+    def local_bindings(statements):
+        names, outer = set(), set()
+
+        class Locals(ast.NodeVisitor):
+            def visit_Name(self, node):
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    names.add(node.id)
+
+            def visit_FunctionDef(self, node):
+                names.add(node.name)
+
+            visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
+
+            def visit_Lambda(self, node):
+                pass
+
+            def visit_Import(self, node):
+                names.update(alias.asname or alias.name.split('.')[0] for alias in node.names)
+
+            def visit_ImportFrom(self, node):
+                names.update(alias.asname or alias.name for alias in node.names)
+
+            def visit_Global(self, node):
+                outer.update(node.names)
+
+            visit_Nonlocal = visit_Global
+
+            def visit_ExceptHandler(self, node):
+                if node.name:
+                    names.add(node.name)
+                self.generic_visit(node)
+
+            def visit_ListComp(self, node):
+                # Comprehension targets have their own scope. Named-expression
+                # targets in expressions can still bind the enclosing function.
+                for generator in node.generators:
+                    self.visit(generator.iter)
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                for value in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
+                    self.visit(value)
+
+            visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_ListComp
+
+        visitor = Locals()
+        for statement in statements:
+            visitor.visit(statement)
+        return names - outer
 
     def scoped_calls(node, env):
         if isinstance(node, ast.Lambda):
@@ -103,15 +283,17 @@ def inspect_python(text):
             yield from scoped_calls(node.value, env)
             bind(node.target, facts(node.value, env), env)
             return
-        # Argument/function expressions may introduce a named expression used by this call.
+        # Python captures the callable before evaluating argument expressions.
+        callee = binding(node.func, env) if isinstance(node, ast.Call) else None
         for child in ast.iter_child_nodes(node):
             yield from scoped_calls(child, env)
         if isinstance(node, ast.Call):
-            yield node, env
+            yield node, env, callee
 
     def check_calls(expression, env, guarded, authenticated):
-        for node, env in scoped_calls(expression, env):
-            target = binding(node.func, env)
+        for node, env, target in scoped_calls(expression, env):
+            if name_of(node.func).endswith(('.wfile.write', '.send_json', '.reply')):
+                disclosure(node, env, guarded, authenticated)
             keywords = {item.arg: item.value for item in node.keywords if item.arg}
             literal = lambda key, value: isinstance(keywords.get(key), ast.Constant) and keywords[key].value is value
             if target in {"eval", "exec", "builtins.eval", "builtins.exec"}:
@@ -136,7 +318,7 @@ def inspect_python(text):
                 if authenticated and isinstance(raw, str) and re.search(r"\bSELECT\b.*\bWHERE\b.*\b(?:id|pk)\s*=", raw, re.I | re.S):
                     where = raw.upper().split("WHERE", 1)[1]
                     if not re.search(r"\b(?:OWNER|USER_ID|TENANT_ID|ACCOUNT_ID)\b", where):
-                        tasks.append({"line": node.lineno, "family": AUTH, "rule": "object-ownership-review",
+                        tasks.append({"line": node.lineno, "column": node.col_offset + 1, "family": AUTH, "rule": "object-ownership-review",
                                       "question": "Authenticated object lookup is keyed by identifier. Verify owner/tenant enforcement in this route, middleware and database policy; public/shared records may be intentional."})
             if target.endswith(".extractall") and isinstance(node.func, ast.Attribute):
                 receiver = facts(node.func.value, env)
@@ -163,13 +345,23 @@ def inspect_python(text):
         if isinstance(target, ast.Name):
             env[target.id] = value
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for element in target.elts:
-                bind(element, {"dynamic": True, "call": ""}, env)
+            elements = value.get('elements') or []
+            for index, element in enumerate(target.elts):
+                bind(element, elements[index] if len(elements) == len(target.elts) else {"dynamic": True, "call": ""}, env)
+        elif isinstance(target, (ast.Subscript, ast.Attribute)):
+            field = facts(target.slice, env).get('literal') if isinstance(target, ast.Subscript) else target.attr.lower()
+            if field in ownership:
+                objects = facts(target.value, env).get('direct_objects', set())
+                for current in env.values():
+                    if current.get('objects', set()) & objects:
+                        current['tampered_objects'] = current.get('tampered_objects', set()) | objects
 
     def merge(env, alternatives):
         for name in set().union(*(scope.keys() for scope in alternatives)):
             values = [scope.get(name, {"dynamic": True, "call": ""}) for scope in alternatives]
-            value = {key: any(item.get(key) for item in values) for key in ('dynamic', 'composed', 'path', 'path_segment_dynamic', 'tar')}
+            value = {**combine_flow(values), **{key: any(item.get(key) for item in values) for key in ('dynamic', 'composed', 'path', 'path_segment_dynamic', 'tar')}}
+            value['principal'] = all(item.get('principal') for item in values)
+            value['direct_objects'] = set.intersection(*(set(item.get('direct_objects', set())) for item in values))
             value['normalized'] = all(item.get('normalized') for item in values)
             for key in ('literal', 'path_root'):
                 if all(key in item and item[key] == values[0].get(key) for item in values):
@@ -187,20 +379,24 @@ def inspect_python(text):
                     env[alias.asname or alias.name.split('.')[0]] = {"dynamic": False, "call": alias.name if alias.asname else alias.name.split('.')[0]}
             elif isinstance(statement, ast.ImportFrom) and statement.module:
                 for alias in statement.names:
-                    env[alias.asname or alias.name] = {"dynamic": False, "call": '.' * statement.level + statement.module + "." + alias.name}
+                    imported = '.' * statement.level + statement.module + "." + alias.name
+                    env[alias.asname or alias.name] = {"dynamic": False, "call": imported, 'request_source': imported == 'flask.request'}
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for expression in statement.decorator_list + statement.args.defaults + [x for x in statement.args.kw_defaults if x]:
                     check_calls(expression, env, guarded, authenticated)
                 env[statement.name] = {"dynamic": False, "call": ""}
                 # A method's unqualified names bypass its class namespace.
                 local = dict(function_env if function_env is not None else env)
+                for name in local_bindings(statement.body):
+                    local[name] = {'dynamic': True, 'call': ''}
                 for argument in parameters(statement.args):
-                    local[argument.arg] = {"dynamic": True, "call": ""}
+                    local[argument.arg] = {"dynamic": True, "call": "", 'parameter': True}
                 # Include schema-independent authentication context, never infer an authorization defect.
                 auth = any(isinstance(item, ast.Constant) and item.value == 'Authorization'
                            or isinstance(item, ast.Attribute) and name_of(item) in {'request.user', 'request.session'}
                            or isinstance(item, ast.Name) and item.id == 'current_user' for item in ast.walk(statement))
                 auth |= any(binding(item.func if isinstance(item, ast.Call) else item, env).endswith('login_required') for item in statement.decorator_list)
+                auth |= any(isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr in {'route', 'get', 'post', 'put', 'patch', 'delete'} for item in statement.decorator_list)
                 body(statement.body, local, authenticated=auth)
             elif isinstance(statement, ast.ClassDef):
                 for expression in statement.decorator_list + statement.bases + [item.value for item in statement.keywords]:
@@ -221,7 +417,7 @@ def inspect_python(text):
                 check_calls(statement.target, env, guarded, authenticated)
                 check_calls(statement.value, env, guarded, authenticated)
                 old, value = facts(statement.target, env), facts(statement.value, env)
-                bind(statement.target, {"dynamic": old.get('dynamic') or value.get('dynamic'), 'composed': True, 'call': ''}, env)
+                bind(statement.target, {**combine_flow([old, value]), "dynamic": old.get('dynamic') or value.get('dynamic'), 'composed': True, 'call': ''}, env)
                 guarded = {item for item in guarded if item[0] != name_of(statement.target)}
             elif isinstance(statement, (ast.With, ast.AsyncWith)):
                 local = env
@@ -233,9 +429,11 @@ def inspect_python(text):
             elif isinstance(statement, ast.If):
                 check_calls(statement.test, env, guarded, authenticated)
                 left, right = dict(env), dict(env)
-                body(statement.body, left, guarded, authenticated)
+                body(statement.body, left, guarded | object_guard(statement.test, env, ast.Eq), authenticated)
                 body(statement.orelse, right, guarded, authenticated)
                 merge(env, [left, right])
+                if terminates(statement.body, env):
+                    guarded |= object_guard(statement.test, env, ast.NotEq)
                 # A narrow guard suppresses only a normalized path checked in this local block.
                 test = statement.test
                 if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.NotIn)
@@ -263,7 +461,11 @@ def inspect_python(text):
                 merge(env, [env.copy(), local])
             else:
                 check_calls(statement, env, guarded, authenticated)
+                if isinstance(statement, ast.Return) and statement.value is not None:
+                    disclosure(statement.value, env, guarded, authenticated)
     body(tree.body, {})
+    candidate_positions = {(item['line'], item['column']) for item in signals if item['rule'] == 'python-object-authorization'}
+    tasks = [item for item in tasks if (item['line'], item['column']) not in candidate_positions]
     return signals, tasks
 
 

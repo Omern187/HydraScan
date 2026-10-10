@@ -23,6 +23,10 @@ Review the declared JavaScript/framework gaps even when no candidate is emitted.
 
 ## Decide and retain evidence
 
+Native object-access triage follows a request-derived identifier through a selected SQL lookup into a return or recognized response send. It records `evidence_lines`, call column, table and `ownership_schema_observed`; unknown schemas and sharing policy remain explicit proof gaps. Literal schema ownership helps prioritize a trace, but does not itself prove that every row is private. A lookup without the demonstrated return/send flow remains a review question.
+
+Recognized counterevidence is deliberately narrow: exact principal binding in a flat owner predicate, the specific owner-or-public query form, or a terminating check of the same unchanged row before returning it. Negation, comments/literals, arithmetic, conditional guards, checks of wrappers/other rows and overwritten ownership fields do not establish that control. Building a response object before a guard differs from sending it. Principal/schema/framework recognition is heuristic and requires host validation; unusual SQL dialects, ORM/joins, policy helpers, cross-function paths, arbitrary mutations and writes/deletes remain outside this local read-flow proof.
+
 Use [reporting.md](reporting.md) to distinguish `candidate`, `source-confirmed` and `dynamic-confirmed`. Record supported roles, source/build, valid fixture setup, actual effect, legitimate control, counterevidence and any mock substitutions. Native ownership questions stay `review-task` until a reviewer supplies a finding record; do not include them in confirmed counts.
 
 Use the [coverage matrix](coverage.md) and [multi-agent workflow](multi-agent-review.md) for untested boundaries. Missing credentials, unavailable runtime, interrupted agents and withheld source remain gaps. If an agent/tool rejects an action, preserve the actual failure and continue other permitted work without relaunching the same action under a disguised request.
