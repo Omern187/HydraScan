@@ -1,8 +1,8 @@
 # HydraScan
 
-A multi-agent skill for finding logic bugs, broken workflows, and security vulnerabilities in apps and websites, with evidence validation and coverage tracking.
+A native review runner and multi-agent skill for finding logic bugs, broken workflows, and security vulnerabilities in apps and websites, with evidence validation and coverage tracking.
 
-HydraScan gives a coding agent a coordinated review workflow: several reviewers examine different boundaries, another reviewer challenges consequential findings, and a coordinator produces a single report with evidence and remaining gaps.
+HydraScan uses its own Python standard-library runner to inventory source, prepare a bounded text snapshot, surface static candidates, run explicitly selected checks and save review artifacts. A coding agent coordinates complementary reviewers, independently challenges consequential findings and produces a single report with evidence and remaining gaps. It works without a separate scanner engine.
 
 ## What it reviews
 
@@ -11,7 +11,7 @@ HydraScan gives a coding agent a coordinated review workflow: several reviewers 
 - **Identity and trust:** authentication, authorization, tenant isolation, sessions, data exposure, API contracts and native bridges.
 - **Runtime and distribution:** alternate launchers, release assets, dependencies, resource limits, deployment configuration and Electron boundaries.
 
-The workflow applies to source review, disposable local tests, authorized staging assessments, finding triage and requested remediation. It can review ordinary bugs without installing a penetration-testing engine.
+The workflow applies to source review, disposable local tests, authorized staging assessments, finding triage and requested remediation. The runner needs Python 3.10+ and no third-party packages. Semantic review uses the host coding agent; the CLI alone does not launch AI agents or autonomously discover every kind of defect.
 
 ## Install
 
@@ -23,7 +23,33 @@ Use $skill-installer to install the skill from Omern187/HydraScan at skills/hydr
 
 The installable skill is [skills/hydrascan](skills/hydrascan). For manual installation, copy that folder into your skills directory as `hydrascan` (normally `~/.codex/skills/hydrascan`, or `$CODEX_HOME/skills/hydrascan` when configured). The skill entrypoint is [SKILL.md](skills/hydrascan/SKILL.md).
 
-The installed skill is available on the next turn. Multi-agent execution requires a host that supports delegation; otherwise the applicable review lanes run sequentially and that limitation is reported.
+The installed skill is available on the next turn. Multi-agent execution requires a host that supports delegation; otherwise the applicable review lanes run sequentially and that limitation is reported. No Docker, separate provider account or API key is required by the native runner.
+
+## Run the native CLI
+
+From a checkout of this repository:
+
+```text
+python skills/hydrascan/scripts/hydrascan.py doctor
+python skills/hydrascan/scripts/hydrascan.py scan /path/to/app --output /path/to/new-run
+python skills/hydrascan/scripts/hydrascan.py collect /path/to/new-run
+```
+
+Use a new run directory outside the reviewed source. For an installed skill, use the script under that skill's installed directory. `scan` creates inventory, candidates, check outcomes, a 32-family coverage ledger, a Markdown report and a continuation checkpoint. `collect` refreshes saved summaries while preserving manual notes; it does not re-test or scan changed source.
+
+Application commands execute only when supplied through `--checks /path/to/checks.json`. For example:
+
+```json
+[
+  {
+    "name": "unit tests",
+    "argv": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+    "timeout": 60
+  }
+]
+```
+
+Checks run sequentially in the snapshot with argument arrays and no shell. Inspect the code and selected commands first: the snapshot is **not an OS/network sandbox**, and check processes can access the host environment, filesystem and network. Use an appropriately contained disposable environment for untrusted execution. See [native runner details](skills/hydrascan/references/engine.md).
 
 ## Use
 
@@ -81,13 +107,13 @@ Each accepted finding records the source/build, preconditions, expected versus o
 
 Important probes include out-of-order file loads, generated artifact inspection, failures hidden by success messages, special object keys, streamed Unicode, encoded identifiers, rejected imports and concurrent shared-file writes. Select probes that match the actual architecture. Passing existing tests does not clear untested failure paths, and a passing bug-demonstration script does not verify a fix.
 
-## Security backend
+## What the runner establishes
 
-Use HydraScan as the entrypoint for the whole assessment. Its reviewers examine code and application behavior, and its coordinator can invoke a configured security-testing backend and validate the resulting evidence in the same report.
+Static Python AST and JavaScript/TypeScript/HTML signals are candidates requiring review of reachability, controls and impact. Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
 
-The current package is an agent skill with backend execution instructions. It does not yet contain a runtime adapter or a bundled engine. Installing the skill alone does not install or automatically start a scanner. Backend execution requires the documented dependencies, provider configuration and an established run budget.
+The text snapshot excludes symlinks, dependency/Git directories, known secret files, binaries and oversized files. Inspect the inventory for actual exclusions. Those omissions, missing runtime artifacts and untested deployed builds remain coverage gaps. Filename filtering does not guarantee that included code contains no secrets; inspect and redact reports and keep raw logs private.
 
-See [backend execution and setup](skills/hydrascan/references/engine.md) for the supported engine, isolation, artifact interpretation and continuation rules.
+HydraScan does not install project dependencies, auto-run discovered commands, perform built-in HTTP scans, call hosted model providers or upload source. Host agents can test authorized local/staging behavior with available tools and incorporate the evidence into the same assessment.
 
 ## Repository contents
 
@@ -96,6 +122,7 @@ README.md
 skills/hydrascan/
   SKILL.md
   agents/openai.yaml
+  scripts/hydrascan.py
   references/
     behavioral-probes.md
     coverage.md
@@ -103,14 +130,24 @@ skills/hydrascan/
     multi-agent-review.md
     reporting.md
     engine.md
+    provenance.md
+tests/
 ```
 
-This repository contains reusable review instructions and UI metadata. Private application reports, credentials, generated application binaries and engine executables are not included.
+This repository contains the native runner, review instructions, UI metadata and runner tests. Private application reports, credentials and generated application binaries are not included.
+
+To test HydraScan itself from the repository root:
+
+```text
+python -m unittest discover -s tests -v
+```
+
+These tests verify the runner; they do not assess another application's security.
 
 ## Scope
 
 Active testing uses the established authorized targets and effects, preferably disposable local instances or staging with synthetic data. A review request does not authorize production changes, additional hosts, paid/cloud runs or external reporting. The final report states actual coverage and remaining gaps; HydraScan does not guarantee discovery of every vulnerability or certify compliance.
 
-Upstream credits, the inspected source revision and engine licensing are preserved in the [technical provenance reference](skills/hydrascan/references/engine.md#basis-for-this-skill). HydraScan adds functional probes, complementary-agent coordination and resumable review records.
+Historical inspiration and upstream credits are preserved in the [provenance reference](skills/hydrascan/references/provenance.md). They are not runtime dependencies. HydraScan has its own runner, functional probes, complementary-agent coordination and resumable review records.
 
-Current workflow revision: **2026-10-10.6**.
+Current workflow revision: **2026-10-10.7**.

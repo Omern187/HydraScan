@@ -7,7 +7,7 @@ Scale the report to the request. A focused bug review can stay inline; a broad/r
 1. Outcome: most consequential findings, confirmed versus unverified, and practical effect.
 2. Scope: repositories, source revision/working-tree fingerprint, deployed build/hosts/ports, environment, roles/tenants, included/excluded assets, permissions relied on, dates and standard editions.
 3. Findings: distinguish security vulnerabilities, functional bugs and hardening observations; lead with the requested emphasis and greatest demonstrated impact. In a functional review, lead with blocked journeys, wrong results and data-loss bugs. Deduplicate by root cause without dropping distinct locations or impacts.
-4. Coverage: each requested family/extension with status, actual method and evidence, covered surfaces/roles, remaining gaps and reasons. A live-only review must disclose unavailable source/infra/logging coverage.
+4. Coverage: each requested family/extension with status, actual method and evidence, covered surfaces/roles, remaining gaps and reasons. A live-only review must disclose unavailable source/infra/logging coverage. Native runner rows are preliminary; candidate signals or completed processes do not justify clearing a family.
 5. Fixes and validation when performed: exact patch state, tests and results, preserved behavior, retest evidence and unresolved decisions.
 6. Continuation: specific next checks, required inputs and the saved checkpoint/run identifiers.
 
@@ -49,22 +49,22 @@ An untested write/export path stays open even if the read path is safe. If a che
 
 For ongoing reviews, save `review-state.md` alongside the consolidated report. Record:
 
-- Assessment ID, last update time/time zone, skill/upstream revision, report location.
+- Assessment ID, last update time/time zone, skill/runner revision, report location.
 - Exact target/source/deployed build, requested mode, scope/exclusions and established authorization. Never store secret values or assume approval transfers to new hosts.
 - Account role/tenant labels and how access is supplied; use references to approved secret stores, not credentials.
 - Completed checks and evidence, family and per-feature/journey statuses, open candidate IDs and proof gaps, blockers and next actions in impact order.
 - For a delegated review, agent/lane ownership, statuses, evidence directories, independent validation outcomes, duplicate mappings and remaining coverage. Track each agent's live processes/runs and cleanup owner.
 - Changes applied, fix states, tests already run, unresolved product decisions.
-- Backend name/version, working directory, run directory/name, process/session identity if running, status, chosen flags, configured budget, observed usage and remaining authorized allowance. Record whether saved engine state exists.
+- Native runner/Python version, source fingerprint and inventory exclusions, working/run directories, explicit check definitions and outcomes, log references, and process/session identities if runtime work remains active. Record agent and resource limits separately; the CLI does not save or restore agent sessions.
 - Stop reason, any unexpected effects and cleanup state. Redact commands/logs containing secrets.
 
 When reporting a blocked or interrupted check, state the concrete evidence and affected action: unavailable dependency, observed tool rejection or runtime failure. Distinguish that from unfinished reporting or an untested surface. Ambient browser content and a help page alone are not evidence that a tool or policy blocked the review; continue independent authorized work when possible.
 
-On continuation, read the checkpoint and relevant findings, verify reality against recorded state, and proceed with the next useful check. Re-read only changed or relevant source rather than repeat a finished whole-app audit. Preserve previous evidence, record superseded findings explicitly, and do not infer approval for a new deployment, cloud upload, increased cost, external message or production effect.
+On continuation, read the checkpoint and relevant findings, verify reality against recorded state, and proceed with the next useful check. Re-read only changed or relevant source rather than repeat a finished whole-app audit. Preserve previous evidence, record superseded findings explicitly, and do not infer approval for a new deployment, cloud upload, increased cost, external message or production effect. For native runs, place reviewer findings and decisions in the designated manual-note sections; `collect` refreshes generated summaries without re-running checks or validating candidates. See [engine.md](engine.md).
 
 ## Quality gate
 
-Before delivering, check that every confirmed finding has evidence, every severity has a justified consequence, every claimed test actually ran, and all interrupted/blocked coverage is visible. Verify report links and line numbers against the reviewed revision. Distinguish skill validation, engine installation, and application security testing; passing a skill-format validator proves none of the latter two.
+Before delivering, check that every confirmed finding has evidence, every severity has a justified consequence, every claimed test actually ran, and all interrupted/blocked coverage is visible. Verify report links and line numbers against the reviewed revision. Distinguish skill-format validation, runner tests, static candidates and application behavior testing; passing tooling checks does not establish application security or correctness. Inspect excluded files and runtime/artifact gaps, and redact source snippets and raw logs before publication.
 
 For state-changing findings, record the durable and post-reload outcome when relevant; UI text alone is insufficient. Distinguish a successful bug-demonstration script from a successful fix regression test. Record invalidated candidates and failed exploratory fixtures in the checkpoint without adding them to the finding count. Existing green tests do not clear branches they did not exercise.
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "HydraScan"
-  short_description: "Review app bugs and security with complementary agents"
-  default_prompt: "Use $hydrascan to coordinate complementary agents for logic, inputs, authorization and runtime checks, independently validate consequential findings, and save evidence, coverage and a checkpoint within the authorized scope."
+  short_description: "Native app review with evidence and complementary agents"
+  default_prompt: "Use $hydrascan and its native runner to review logic, inputs, authorization and runtime with complementary agents, validate consequential candidates, and save evidence, coverage and a checkpoint within the authorized scope."
