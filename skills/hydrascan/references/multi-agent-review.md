@@ -18,6 +18,8 @@ Technology extensions and UI/accessibility checks still need named owners when r
 
 Start with a small bounded team. Respect the host's actual concurrent-agent and resource limits. With four total slots, use one coordinator and up to three reviewers; the coordinator can handle runtime/inventory initially, and assign a free slot to a runtime specialist or validator in a later wave. The number of lanes is not a demand to launch them all simultaneously. Keep model settings inherited unless the user or applicable instructions select otherwise.
 
+In Claude Code, keep the coordinator in the main conversation and use its available subagent mechanism. Pass the installed `SKILL.md` path, lane-specific references and assessment contract explicitly; do not assume the parent skill is already loaded in a child. Use a reviewer capable of execution when a lane needs tests, rather than assigning runtime verification to a read-only exploration agent. No custom `.claude/agents` files, agent teams or experimental settings are required. In Codex, use the host's corresponding delegation tools. See [hosts.md](hosts.md) for installation and capability differences.
+
 ## Prepare a shared assessment contract
 
 Before dispatch, the coordinator pins the requested revision/build, records authorized targets and review mode, reads applicable repository instructions and maps entrypoints. For a native source run, one owner prepares the snapshot and reads inventory, candidates, check outcomes and the preliminary coverage ledger using [engine.md](engine.md). Install shared test dependencies once if needed within the task; keep original reviewed source read-only for a review-only task. Snapshot exclusions are evidence gaps, not proof that those surfaces are safe.

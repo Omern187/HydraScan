@@ -2,7 +2,7 @@
 
 ![HydraScan — code review for bugs and security issues](assets/hydrascan-banner.svg)
 
-A Codex skill for reviewing apps and websites with multiple agents.
+A skill for Codex and Claude Code to review apps and websites with multiple agents.
 
 [Get started](#get-started) &nbsp;·&nbsp; [Review process](#review-process) &nbsp;·&nbsp; [CLI](#cli) &nbsp;·&nbsp; [Reports](#reports) &nbsp;·&nbsp; [Docs](#docs)
 
@@ -16,11 +16,11 @@ The included Python CLI collects source files, flags possible issues and runs ch
 
 ## Get started
 
-You need **Codex with skill support**. The CLI requires **Python 3.10+**; JavaScript/TypeScript AST analysis has an optional Node/Babel setup below. The base runner uses the Python standard library and needs no separate scanner, Docker or API key.
+Use **Codex or Claude Code**. The CLI requires **Python 3.10+**; JavaScript/TypeScript AST analysis has an optional Node/Babel setup below. The base runner uses the Python standard library and needs no separate scanner, Docker or API key.
 
 ### 1. Install
 
-Ask Codex:
+**Codex** — ask:
 
 ```text
 Use $skill-installer to install
@@ -28,8 +28,10 @@ Omern187/HydraScan at
 skills/hydrascan.
 ```
 
+**Claude Code** — clone or download this repository, then copy the entire [skills/hydrascan](skills/hydrascan) folder to `~/.claude/skills/hydrascan`. For one project, use `.claude/skills/hydrascan` inside that project. Start a new session and invoke `/hydrascan`. [Claude Code skill docs](https://code.claude.com/docs/en/skills)
+
 <details>
-<summary>Manual installation</summary>
+<summary>Manual Codex installation</summary>
 
 Copy the entire [skills/hydrascan](skills/hydrascan) folder to `~/.codex/skills/hydrascan`, or `$CODEX_HOME/skills/hydrascan` if configured. Include the scripts and references. The skill is available on the next turn.
 
@@ -37,7 +39,7 @@ Copy the entire [skills/hydrascan](skills/hydrascan) folder to `~/.codex/skills/
 
 ### 2. Run your first review
 
-Open the project you want to review and ask:
+Open the project you want to review. In **Codex**, ask:
 
 ```text
 Use $hydrascan to review this app
@@ -47,10 +49,36 @@ verify findings, and save tested
 paths and remaining checks.
 ```
 
+In **Claude Code**, use:
+
+```text
+/hydrascan Review this app for bugs
+and security issues. Use separate
+reviewers, verify findings, and save
+tested paths and remaining checks.
+```
+
 The review saves a report and `review-state.md` so you can continue later.
 
 <details>
+<summary>Using HydraScan in Claude chat</summary>
+
+From a committed checkout, build a skill-only ZIP:
+
+```sh
+git archive --format=zip --output=hydrascan-skill.zip HEAD:skills
+```
+
+Upload it through Claude's custom Skills interface with code execution enabled. The ZIP contains `hydrascan/SKILL.md` and its scripts and references. Uploading the skill doesn't give Claude access to your local app; the reviewed source must be separately accessible within the authorized workflow.
+
+Chat capabilities vary. HydraScan uses available files and tools, runs review lanes sequentially when delegation is unavailable, and records missing execution or runtime access. Use Claude Code for a local repository workflow. [Host details](skills/hydrascan/references/hosts.md) · [Claude upload guide](https://support.claude.com/en/articles/12512180-use-skills-in-claude)
+
+</details>
+
+<details>
 <summary>Review GitHub code, resume a review, or apply fixes</summary>
+
+The prompts below use Codex syntax. In Claude Code, replace `Use $hydrascan to` with `/hydrascan`.
 
 **GitHub repository**
 
@@ -101,6 +129,8 @@ flowchart TB
 ```
 
 Reviewers start with the same source revision and separate assignments. Findings are compared after discovery. Work runs in batches or sequentially when the host has fewer agent slots.
+
+In Claude Code, the coordinator passes each reviewer the skill instructions and scope explicitly. No custom agent configuration or experimental agent-team setting is required.
 
 The review tracks **32 risk categories**, including unfinished checks. The CLI supports selected Python flows across files, SQL/ORM access patterns and optional JavaScript/TypeScript AST analysis. Unsupported paths are recorded for manual review. [Analysis limits](skills/hydrascan/references/project-analysis.md) · [Agent workflow](skills/hydrascan/references/multi-agent-review.md)
 
@@ -211,6 +241,7 @@ Synthetic reviews found missed issues and false positives. Those cases informed 
 | Guide | Contents |
 | --- | --- |
 | [Skill instructions](skills/hydrascan/SKILL.md) | Full workflow and when to use it. |
+| [Host support](skills/hydrascan/references/hosts.md) | Codex, Claude Code, custom-skill upload and capability differences. |
 | [Runner](skills/hydrascan/references/engine.md) | Commands, checks, snapshots and saved files. |
 | [Source analysis](skills/hydrascan/references/project-analysis.md) | Supported code patterns and limitations. |
 | [Agent coordination](skills/hydrascan/references/multi-agent-review.md) | Assignments, scheduling and independent verification. |

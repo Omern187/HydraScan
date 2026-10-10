@@ -3,3 +3,4 @@ __pycache__/
 .env
 review-runs/
 node_modules/
+hydrascan-skill.zip

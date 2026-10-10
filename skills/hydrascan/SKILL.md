@@ -2,6 +2,7 @@
 name: hydrascan
 description: Review apps, websites, APIs, and source code for logic errors, broken workflows, incorrect results, crashes, integration failures, and security vulnerabilities using the HydraScan multi-agent workflow. Use for requested bug hunts, injection checks, security audits, authorized penetration testing, and remediation of findings. Includes coordinated multi-agent review, behavior validation, risk coverage, fixes, and resumable records. Does not activate merely because ordinary feature work touches authentication or input handling.
 metadata:
+  hosts: "Codex, Claude Code, and capability-dependent Claude custom Skills"
   inspiration: "https://github.com/usestrix/strix"
   inspiration-revision: "62b496430da5df5e9e79a190e7af6f92529883a3"
   local-revision: "2026-10-10.10"
@@ -12,6 +13,14 @@ metadata:
 Find actionable bugs and security weaknesses, establish their actual impact, and make the next review easy to continue. Functional review must examine code logic and how the product actually operates: incorrect results, broken transitions, crashes, failed integrations, and anything that prevents expected use. Use HydraScan's own runner, source analysis and ordinary application tests within one assessment. Follow the user's language for summaries.
 
 HydraScan combines a Python standard-library runner with host-agent semantic review, counterevidence, validation, fix verification and resumable records. No separate scanner, Docker or provider account is required. The CLI prepares candidates and evidence; it does not independently perform AI reasoning or guarantee that every vulnerability will be found. Read [references/engine.md](references/engine.md) when using the runner, and [references/project-analysis.md](references/project-analysis.md) for cross-file flow, SQL/ORM, authorization controls and optional JS/TS AST setup. Historical credit is in [references/provenance.md](references/provenance.md).
+
+## Adapt to the host
+
+The same skill works in Codex (`$hydrascan`) and Claude Code (`/hydrascan`). Use the current host's available tools and permission rules; do not assume a Codex-specific tool, installer, model or fixed agent limit. Locate scripts and references relative to this installed `SKILL.md`, even when the application is the working directory.
+
+Keep coordination in the main conversation. Give delegated reviewers the installed skill path, relevant references, pinned source, authorized scope and their lane; do not assume they inherit the active skill or conversation. Use separate reviewers where supported, or sequential lanes with that limitation recorded. A delegated lane owns its assignment and returns results to the coordinator without relaunching the whole team.
+
+Read [references/hosts.md](references/hosts.md) for Claude installation, invocation, delegation or custom-skill upload. In a Claude chat or other restricted host, review only accessible supplied source and use available execution tools. Missing filesystem, shell, browser, network or delegation capabilities are coverage gaps, not reasons to claim a completed runtime or multi-agent review.
 
 ## Select the work and establish scope
 
