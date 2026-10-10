@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-VERSION = "2026-10-10.10"
+VERSION = "2026-10-10.11"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hydrascan_source import inspect_python
@@ -162,13 +162,13 @@ def analyze(root, files, *, node=None, js_parser_root=None):
             if suffix == '.py':
                 credential_values = []
                 names = r'(?i)(?:api_?key|access_?token|password|client_?secret)'
-                for node in ast.walk(ast.parse(text)):
-                    if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant):
-                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for ast_node in ast.walk(ast.parse(text)):
+                    if isinstance(ast_node, (ast.Assign, ast.AnnAssign)) and isinstance(ast_node.value, ast.Constant):
+                        targets = ast_node.targets if isinstance(ast_node, ast.Assign) else [ast_node.target]
                         if any(re.fullmatch(names, target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else '') for target in targets):
-                            credential_values.append((node.value.value, node.value.lineno))
-                    elif isinstance(node, ast.Dict):
-                        for key, value in zip(node.keys, node.values):
+                            credential_values.append((ast_node.value.value, ast_node.value.lineno))
+                    elif isinstance(ast_node, ast.Dict):
+                        for key, value in zip(ast_node.keys, ast_node.values):
                             if isinstance(key, ast.Constant) and isinstance(key.value, str) and re.fullmatch(names, key.value) and isinstance(value, ast.Constant):
                                 credential_values.append((value.value, value.lineno))
             else:

@@ -5,7 +5,7 @@ metadata:
   hosts: "Codex, Claude Code, and capability-dependent Claude custom Skills"
   inspiration: "https://github.com/usestrix/strix"
   inspiration-revision: "62b496430da5df5e9e79a190e7af6f92529883a3"
-  local-revision: "2026-10-10.10"
+  local-revision: "2026-10-10.11"
 ---
 
 # HydraScan
