@@ -13,7 +13,7 @@ python skills/hydrascan/scripts/hydrascan.py scan /path/to/app --output /path/to
 
 For an installed skill, resolve the script relative to the skill folder rather than assuming the current directory contains it. Choose a new output directory outside the source tree. Pin the requested source revision first; a scan of a stale checkout does not assess the GitHub version the user requested.
 
-The runner prepares a bounded text snapshot, inventories included and skipped files, and records static Python AST and JavaScript/TypeScript/HTML signals. Symlinks, dependency/Git directories, known secret files, binary files and oversized files are excluded. Current bounds are 2 MiB per file, 100 MiB of included content and 10,000 files. Inspect `inventory.json` for actual exclusions and `analysis-gaps.json` for unavailable or failed parsing. Filename filtering is not a guarantee that source content contains no credentials or private records; inspect and redact evidence before sharing it.
+The runner prepares a bounded text snapshot, inventories included and skipped files, and records Python AST/local assignment-flow and JavaScript/TypeScript/HTML lexical signals. Python triage resolves local evaluator/import aliases and prioritizes composed SQL, variable path segments, TAR extraction and outbound clients. JavaScript triage masks comments and ordinary literals, examines inline scripts and reduces trusted-literal HTML noise. The helper is bundled at `scripts/hydrascan_source.py`; copy the entire skill folder when installing. Symlinks, dependency/Git directories, known secret files, binary files and oversized files are excluded. Current bounds are 2 MiB per file, 100 MiB of included content and 10,000 files. Inspect `inventory.json` for actual exclusions and `analysis-gaps.json` for unavailable or failed parsing. Filename filtering is not a guarantee that source content contains no credentials or private records; inspect and redact evidence before sharing it.
 
 Excluded source, absent dependencies, generated assets and packaged binaries are coverage gaps. Read relevant originals within scope when needed, and test the actual application/build separately. The inventory fingerprint describes the originally included text, not the complete deployed build or the private copy after checks run. Checks can modify that copy; verify reviewed code against the pinned source and record mutations rather than silently attributing changed code to the original revision.
 
@@ -53,8 +53,9 @@ The run directory contains:
 | --- | --- |
 | `run.json` | Runner version, source/run identity and execution status |
 | `inventory.json` | Included-file fingerprint and skipped-file/limit evidence |
-| `candidates.json` | Static signals requiring reachability, control and consequence review |
-| `analysis-gaps.json` | Source parsing and analysis failures requiring follow-up |
+| `candidates.json` | Source signals requiring reachability, control and consequence review |
+| `security-review-tasks.json` | Ownership/tenant questions needing semantic review; not vulnerability findings |
+| `analysis-gaps.json` | Failed parsing and known lexical/framework limitations requiring follow-up |
 | `snapshot-changes.json` | Inventoried source files modified, removed or replaced during check execution |
 | `checks.json` | Selected process checks, outcomes and log references |
 | `coverage.json` | The 32 review families, with preliminary states and remaining work |
@@ -62,7 +63,9 @@ The run directory contains:
 | `review-state.md` | Generated continuation checkpoint and manual review notes |
 | Private logs | Raw process output; inspect locally and redact before delivery |
 
-A static match is a `candidate`, not a confirmed vulnerability. A successful process check proves only what that check exercises; a failed check can be an environment failure. Neither outcome establishes that the application is secure or that a candidate is valid. The runner leaves coverage `not-started` or `partial`; agents must supply evidence before accepting findings or claiming checked coverage.
+A static match is a `candidate`, not a confirmed vulnerability. A successful process check proves only what that check exercises; a failed check can be an environment failure. Neither outcome establishes that the application is secure or that a candidate is valid. The runner leaves coverage `not-started` or `partial`; agents must supply evidence before accepting findings or claiming checked coverage. Read [security-validation.md](security-validation.md) for source flow, role matrices, containment, outbound controls and limitations. Local-flow/lexical heuristics do not model interprocedural calls, dynamic dispatch, all JS/TS syntax, framework policy or deployed behavior. Recognized safe patterns suppress only individual signals; they never clear a coverage family.
+
+Every JavaScript/TypeScript/markup source gets a lexical-analysis gap. Regex literals, nested template interpolation and escaped embedded-script strings may produce missed or spurious candidates. Vue/Svelte scanning covers script elements; framework markup expressions require host review. HTML comments, inert script types, attributes and template-contained scripts are excluded from executable-script triage. These exclusions do not establish that subsequent runtime insertion or transformation is safe.
 
 Keep confirmed finding records using [reporting.md](reporting.md), including legitimate controls, source/build, substitutions and remaining proof gaps. Use [coverage.md](coverage.md) to assign unfinished families and [multi-agent-review.md](multi-agent-review.md) to coordinate reviewers. Keep raw logs private; generated reports may contain source paths and snippets and need review before publication.
 

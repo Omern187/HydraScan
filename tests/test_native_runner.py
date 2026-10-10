@@ -90,7 +90,7 @@ class NativeReviewTests(unittest.TestCase):
         candidates = self.read('candidates.json')
         self.assertEqual({x['path'] for x in candidates}, {'review.py'})
         self.assertEqual({x['line'] for x in candidates}, {4, 5, 6})
-        self.assertEqual(len(candidates), 3)
+        self.assertEqual({x['rule'] for x in candidates}, {'python-deserialization', 'python-shell', 'python-tls-verification', 'python-outbound-input'})
 
     def test_invalid_source_is_a_gap_and_values_are_withheld(self):
         secret = 'real-looking-fixture-value-123'

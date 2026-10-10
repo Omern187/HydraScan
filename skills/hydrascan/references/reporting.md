@@ -47,6 +47,8 @@ An untested write/export path stays open even if the read path is safe. If a che
 
 ## Checkpoint for continuing
 
+Record native `security-review-tasks.json` entries as open questions with a named owner and outcome. They are not confirmed vulnerabilities.
+
 For ongoing reviews, save `review-state.md` alongside the consolidated report. Record:
 
 - Assessment ID, last update time/time zone, skill/runner revision, report location.

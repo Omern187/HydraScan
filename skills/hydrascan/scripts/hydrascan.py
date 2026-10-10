@@ -16,8 +16,10 @@ import threading
 import time
 from datetime import datetime, timezone
 
-VERSION = "2026-10-10.7"
+VERSION = "2026-10-10.8"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hydrascan_source import inspect_python, inspect_javascript
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", ".cache"}
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -109,82 +111,48 @@ def snapshot(source, destination):
     return {"source": str(source), "fingerprint": fingerprint, "files": included, "excluded": excluded, "bytes": total}
 
 
-def call_name(node):
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return call_name(node.value) + "." + node.attr
-    return ""
-
-
 def analyze(root, files):
-    candidates, gaps = [], []
+    candidates, gaps, review_tasks = [], [], []
 
-    def add(path, line, rule, title, family):
+    def add(path, signal):
+        line, rule = signal['line'], signal['rule']
         identity = f"{path}:{line}:{rule}"
         candidates.append({"id": "HS-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
-                           "rule": rule, "title": title, "path": path, "line": line,
-                           "family": family, "kind": "security", "proof_state": "candidate",
+                           **signal, "path": path, "kind": "security", "proof_state": "candidate",
                            "proof_gap": "Establish reachable input, effective controls and actual impact; a source signal alone is not a vulnerability."})
 
     for item in files:
-        path = item["path"]
-        text = (root / path).read_text(encoding="utf-8-sig")
+        path = item['path']
+        text = (root / path).read_text(encoding='utf-8-sig')
         suffix = Path(path).suffix.lower()
-        if suffix == ".py":
+        signals = []
+        if suffix == '.py':
             try:
-                tree = ast.parse(text, filename=path)
+                signals, tasks = inspect_python(text)
+                for task in tasks:
+                    identity = f"{path}:{task['line']}:{task['rule']}"
+                    review_tasks.append({"id": "HR-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
+                                         "path": path, "kind": "review-task", **task})
             except SyntaxError as error:
-                gaps.append({"path": path, "line": error.lineno, "reason": "Python AST parse failed; inspect the application's supported Python version."})
+                gaps.append({"path": path, "line": error.lineno,
+                             "reason": "Python AST parse failed; inspect the application's supported Python version."})
                 continue
-            aliases = {}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        aliases[alias.asname or alias.name.split('.')[0]] = alias.name if alias.asname else alias.name.split('.')[0]
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    for alias in node.names:
-                        aliases[alias.asname or alias.name] = node.module + "." + alias.name
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = call_name(node.func)
-                first, dot, rest = name.partition(".")
-                name = aliases.get(first, first) + (dot + rest if dot else "")
-                keywords = {x.arg: x.value for x in node.keywords if x.arg}
-                literal = lambda key, value: isinstance(keywords.get(key), ast.Constant) and keywords[key].value is value
-                rule = None
-                if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
-                    rule = ("python-dynamic-code", "Dynamic code evaluation", INPUT)
-                elif name in {"os.system", "os.popen"} or (name.startswith("subprocess.") and literal("shell", True)):
-                    rule = ("python-shell", "Shell interpreter invocation", INPUT)
-                elif name in {"pickle.load", "pickle.loads", "dill.load", "dill.loads", "yaml.unsafe_load"}:
-                    rule = ("python-deserialization", "Deserialization requiring trusted input", PARSER)
-                elif name == "yaml.load" and not (isinstance(keywords.get("Loader"), (ast.Name, ast.Attribute)) and call_name(keywords["Loader"]).split(".")[-1] in {"SafeLoader", "CSafeLoader", "BaseLoader"}):
-                    rule = ("python-yaml-loader", "YAML loader needs configuration review", PARSER)
-                elif name == "ssl._create_unverified_context" or (name.startswith(("requests.", "httpx.")) and literal("verify", False)):
-                    rule = ("python-tls-verification", "TLS peer verification disabled", TRANSPORT)
-                if rule:
-                    add(path, node.lineno, *rule)
-        if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".html", ".vue", ".svelte"}:
-            patterns = [
-                (r"\b(?:eval|new\s+Function)\s*\(", "js-dynamic-code", "Dynamic JavaScript evaluation", INPUT),
-                (r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdangerouslySetInnerHTML\b|\.insertAdjacentHTML\s*\()", "html-rendering", "HTML rendering sink", CONTENT),
-                (r"\b(?:child_process\s*\.\s*exec|execSync)\s*\(", "js-shell", "Shell execution needs input tracing", INPUT),
-                (r"\brejectUnauthorized\s*:\s*false\b", "js-tls-verification", "TLS peer verification disabled", TRANSPORT),
-            ]
-            for expression, rule, title, family in patterns:
-                for match in re.finditer(expression, text):
-                    add(path, text.count("\n", 0, match.start()) + 1, rule, title, family)
-        # Never record the matched literal or a code excerpt in findings.
-        if suffix in {".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".ini"}:
+        elif suffix in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.html', '.vue', '.svelte'}:
+            signals = inspect_javascript(text, html=suffix in {'.html', '.vue', '.svelte'})
+            gaps.append({'path': path, 'line': None, 'reason': 'Lexical/script triage is not a full JS/TS/framework parser: review template interpolation, regex literals, escaped embedded scripts, markup expressions and dynamic dispatch separately.'})
+        for signal in signals:
+            add(path, signal)
+        # Never record matched credentials or code excerpts.
+        if suffix in {'.py', '.js', '.ts', '.json', '.yaml', '.yml', '.toml', '.ini'}:
             expression = r"(?i)\b(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)\b[\"']?\s*[:=]\s*[\"']([^\"'\r\n]{12,})[\"']"
             for match in re.finditer(expression, text):
                 value = match.group(1)
-                if value.startswith(("${", "{{", "<")) or re.search(r"(?i)example|placeholder|your[_-]|changeme", value):
+                if value.startswith(('${', '{{', '<')) or re.search(r'(?i)example|placeholder|your[_-]|changeme', value):
                     continue
-                add(path, text.count("\n", 0, match.start()) + 1, "embedded-credential", "Possible embedded credential (value withheld)", PRIVACY)
-    return candidates, gaps
+                add(path, {"line": text.count('\n', 0, match.start()) + 1, "rule": "embedded-credential",
+                           "title": "Possible embedded credential (value withheld)", "family": PRIVACY,
+                           "method": "literal triage", "detail": "Establish whether this is a credential and who can obtain it; never test it against an unrelated service."})
+    return candidates, gaps, review_tasks
 
 
 def snapshot_changes(root, files):
@@ -371,14 +339,14 @@ def execute_checks(checks, cwd, run):
     return results
 
 
-def coverage(candidates):
+def coverage(candidates, review_tasks=()):
     families = []
     for line in (SKILL_ROOT / "references/coverage.md").read_text(encoding="utf-8").splitlines():
         if line.startswith("| "):
             label = line.split("|")[1].strip()
             if label not in {"Family", "Technology", "---"}:
                 families.append(label)
-    touched = {x["family"] for x in candidates}
+    touched = {x["family"] for x in [*candidates, *review_tasks]}
     return [{"family": label, "status": "partial" if label in touched else "not-started", "owner": "unassigned",
              "method": "source signal triage" if label in touched else "not assessed by native runner",
              "remaining": "Assign agent ownership and validate applicable entrypoints, controls and runtime behavior."}
@@ -411,30 +379,37 @@ def collect(run):
     candidates = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
     checks = json.loads((run / "checks.json").read_text(encoding="utf-8"))
     gaps = json.loads((run / "analysis-gaps.json").read_text(encoding="utf-8"))
+    tasks_path = run / "security-review-tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8")) if tasks_path.exists() else []
     changes = json.loads((run / "snapshot-changes.json").read_text(encoding="utf-8"))
     body = ["# HydraScan local triage", "", f"Run status: {metadata['status']}. Updated: {stamp()}.",
             f"Source fingerprint: `{inventory['fingerprint']}`.",
             f"Text files copied: {len(inventory['files'])}; exclusions: {len(inventory['excluded'])}; parse gaps: {len(gaps)}.",
             f"Inventoried files changed by check execution: {len(changes)}. Static signals refer to the initial snapshot.",
             f"Candidate signals: {len(candidates)}. Confirmed vulnerabilities: not determined by this runner.", "",
-            "## Candidate signals", "", "| ID | Location | Signal | Proof |", "| --- | --- | --- | --- |"]
+            f"Semantic security review tasks: {len(tasks)}. These are questions, not detected vulnerabilities.", "", "## Candidate signals", "", "| ID | Location | Signal | Proof |", "| --- | --- | --- | --- |"]
     for item in candidates:
         body.append(f"| {markdown(item['id'])} | {markdown(item['path'])}:{item['line']} | {markdown(item['title'])} | candidate |")
     if not candidates:
         body.append("| — | — | No supported source signals observed | Broader review still required |")
+    body += ["", "## Semantic security review tasks", "", "| Location | Required review |", "| --- | --- |"]
+    for task in tasks:
+        body.append(f"| {markdown(task['path'])}:{task['line']} | {markdown(task['question'])} |")
+    if not tasks:
+        body.append("| — | No recognized ownership review tasks; policy coverage still requires agent review |")
     body += ["", "## Application checks", "", "| Check | Result | Exit code | Log |", "| --- | --- | --- | --- |"]
     for item in checks:
         body.append(f"| {markdown(item['name'])} | {markdown(item['status'])} | {item['exit_code']} | {markdown(item['log'])} |")
     if not checks:
         body.append("| — | not-run | — | No explicit check commands supplied |")
     body += ["", "## Coverage limits", "",
-             "Signals cover selected Python AST and JavaScript/TypeScript/HTML patterns only. They are hypotheses, not reachability or exploit proof.",
+             "Signals cover selected local Python assignment flows and JavaScript/TypeScript/HTML lexical patterns only. They are hypotheses, not reachability or exploit proof.",
              "Command success does not establish app correctness or security. Review inventory.json exclusions and analysis-gaps.json before interpreting results.",
              "No live targets, authorization flows, package advisories or production builds were tested automatically. Agent-owned coverage and independent validation are still required."]
     update_generated(run / "report.md", "\n".join(body), "## Validated agent findings\n\nRecord evidence-backed findings here, outside the generated markers.")
-    state = f"# HydraScan checkpoint\n\nRun status: {metadata['status']}.\nFingerprint: `{inventory['fingerprint']}`.\nNative candidates: {len(candidates)}. Completed check commands: {len(checks)}.\n\nRead coverage.json and report.md. Assign unowned families; review exclusions and parse gaps; independently validate consequential candidates. Do not equate an empty candidate list with a clean assessment."
+    state = f"# HydraScan checkpoint\n\nRun status: {metadata['status']}.\nFingerprint: `{inventory['fingerprint']}`.\nNative candidates: {len(candidates)}. Open semantic review questions: {len(tasks)}. Completed check commands: {len(checks)}.\n\nRead coverage.json and report.md. Assign unowned families; review exclusions and parse gaps; independently validate consequential candidates. Do not equate an empty candidate list with a clean assessment."
     update_generated(run / "review-state.md", state, "## Agent ownership and continuation\n\nRecord lane owners, evidence, validated/invalidated candidates, resources and next actions here.")
-    return {"run": str(run), "status": metadata["status"], "candidates": len(candidates), "checks": len(checks), "report": str(run / "report.md")}
+    return {"run": str(run), "status": metadata["status"], "candidates": len(candidates), "review_tasks": len(tasks), "checks": len(checks), "report": str(run / "report.md")}
 
 
 def scan(source, run, checks_path=None):
@@ -452,10 +427,11 @@ def scan(source, run, checks_path=None):
     try:
         inventory = snapshot(source, run / "snapshot")
         write_json(run / "inventory.json", inventory)
-        candidates, gaps = analyze(run / "snapshot", inventory["files"])
+        candidates, gaps, tasks = analyze(run / "snapshot", inventory["files"])
         write_json(run / "candidates.json", candidates)
         write_json(run / "analysis-gaps.json", gaps)
-        write_json(run / "coverage.json", coverage(candidates))
+        write_json(run / "security-review-tasks.json", tasks)
+        write_json(run / "coverage.json", coverage(candidates, tasks))
         write_json(run / "checks.json", [])
         write_json(run / "snapshot-changes.json", [])
         execute_checks(checks, run / "snapshot", run)
