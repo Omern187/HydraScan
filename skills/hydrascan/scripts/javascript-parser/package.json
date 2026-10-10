@@ -1,0 +1,7 @@
+{
+  "name": "hydrascan-optional-javascript-parser",
+  "private": true,
+  "description": "Optional, isolated AST parser runtime; application dependencies are never loaded.",
+  "engines": { "node": "^22.18.0 || >=24.11.0" },
+  "dependencies": { "@babel/parser": "8.0.7" }
+}

@@ -105,6 +105,10 @@ def inspect_python(text):
                 flow['direct_objects'] = set(receiver.get('direct_objects', set()))
             elif target == 'dict' and len(values) == 1 and not node.keywords:
                 flow['direct_objects'] = set(values[0].get('direct_objects', set()))
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == 'get' and len(node.args) == 1 and not node.keywords:
+                field = values[0].get('literal')
+                if field in ownership and receiver.get('direct_objects'):
+                    flow['owner_access'] = {(location, field) for location in receiver['direct_objects']}
             if target == "tarfile.open":
                 return {"dynamic": False, "call": "", "tar": True}
             if target in {"pathlib.Path", "Path", "os.path.join"} or target.endswith((".joinpath", ".resolve", ".absolute")):

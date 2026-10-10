@@ -63,6 +63,12 @@ class AuthorizationFlowTests(unittest.TestCase):
     def test_missing_query_arguments_do_not_crash(self):
         helper.inspect_python('db.execute()\ndb.execute("SELECT * FROM records WHERE id = ?")\n')
 
+    def test_mapping_guard_checks_exact_row_without_untrusted_default(self):
+        guard = "    if row.get('owner_id') != current_user.id:\n        abort(403)\n"
+        self.assertEqual(self.candidates(PREFIX + LOOKUP + guard + '    return dict(row)\n'), [])
+        unsafe_default = guard.replace("row.get('owner_id')", "row.get('owner_id', request.args.get('owner'))")
+        self.assertTrue(self.candidates(PREFIX + LOOKUP + unsafe_default + '    return dict(row)\n'))
+
 
 if __name__ == '__main__':
     unittest.main()

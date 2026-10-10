@@ -38,6 +38,15 @@ class NativeReviewTests(unittest.TestCase):
         path.write_text(json.dumps(commands), encoding="utf-8")
         return path
 
+    def test_credential_comments_and_quoted_examples_are_not_assignments(self):
+        self.write('notes.py', '# password = "synthetic_comment_value_123"\nexplanation = \'password = "synthetic_quoted_value_123"\'\n')
+        self.write('config.py', 'password = "synthetic_config_value_123"\nsettings = {"client_secret": "synthetic_setting_value_123"}\n')
+        hydra.scan(self.source, self.run)
+        candidates = self.read('candidates.json')
+        credentials = [item for item in candidates if item['rule'] == 'embedded-credential']
+        self.assertEqual([(item['path'], item['line']) for item in credentials], [('config.py', 1), ('config.py', 2)])
+        self.assertNotIn('synthetic_config_value_123', json.dumps(candidates))
+
     def read(self, name):
         return json.loads((self.run / name).read_text(encoding="utf-8"))
 

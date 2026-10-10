@@ -11,7 +11,7 @@ HydraScan uses its own Python standard-library runner to inventory source, prepa
 - **Identity and trust:** authentication, authorization, tenant isolation, sessions, data exposure, API contracts and native bridges.
 - **Runtime and distribution:** alternate launchers, release assets, dependencies, resource limits, deployment configuration and Electron boundaries.
 
-The workflow applies to source review, disposable local tests, authorized staging assessments, finding triage and requested remediation. The runner needs Python 3.10+ and no third-party packages. Semantic review uses the host coding agent; the CLI alone does not launch AI agents or autonomously discover every kind of defect.
+The workflow applies to source review, disposable local tests, authorized staging assessments, finding triage and requested remediation. The base runner needs Python 3.10+ and no third-party Python packages. Full JS/TS/JSX AST analysis optionally uses Node and the pinned Babel parser; the CLI reports when it falls back to limited lexical analysis. Semantic review uses the host coding agent; the CLI alone does not launch AI agents or autonomously discover every kind of defect.
 
 ## Install
 
@@ -50,6 +50,17 @@ Application commands execute only when supplied through `--checks /path/to/check
 ```
 
 Checks run sequentially in the snapshot with argument arrays and no shell. Inspect the code and selected commands first: the snapshot is **not an OS/network sandbox**, and check processes can access the host environment, filesystem and network. Use an appropriately contained disposable environment for untrusted execution. See [native runner details](skills/hydrascan/references/engine.md).
+
+## Optional JavaScript/TypeScript AST
+
+Install the pinned parser in HydraScan's own trusted runtime, separately from the reviewed application. Use a Node version supported by [the parser manifest](skills/hydrascan/scripts/javascript-parser/package.json):
+
+```text
+npm ci --prefix skills/hydrascan/scripts/javascript-parser
+python skills/hydrascan/scripts/hydrascan.py doctor
+```
+
+For an isolated installation elsewhere, pass `--js-parser-root /path/to/parser-runtime` to `doctor` and `scan`, or set `HYDRASCAN_JS_PARSER_ROOT`. That directory must contain the installed `node_modules`. Select an explicit Node executable with `--node` or `HYDRASCAN_NODE`. The runner never installs packages automatically or loads the target application's parser configuration. A missing parser, parse failure or resource bound is recorded in `analysis-gaps.json`; fallback output does not count as AST coverage.
 
 ## Use
 
@@ -109,7 +120,7 @@ Important probes include out-of-order file loads, generated artifact inspection,
 
 ## What the runner establishes
 
-Local Python assignment-flow and JavaScript/TypeScript/HTML lexical signals are candidates requiring review of reachability, controls and impact. Triage includes composed queries, variable path segments, TAR extraction, evaluator aliases and outbound URL calls. Python object-access triage follows a request-selected record to its return/send, records input/lookup/disclosure locations and distinguishes narrow owner controls from misleading checks. Unknown schema, sharing intent and external policy remain proof gaps. Lookups without the demonstrated disclosure flow stay separate questions in `security-review-tasks.json`. Comments and constant HTML are distinguished from executable/user-derived sinks in the recognized source forms. See [cybersecurity validation](skills/hydrascan/references/security-validation.md). Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
+Local Python and bounded cross-file AST flow, selected SQL/ORM authorization boundaries, and optional JS/TS/JSX Babel AST signals are candidates requiring review of reachability, controls and impact. Cross-file traces include caller and sink locations. Authorization review covers selected read/write/delete paths and exact owner/tenant controls; admin route policy remains a reviewer question. See [project analysis details](skills/hydrascan/references/project-analysis.md). Triage includes composed queries, variable path segments, TAR extraction, evaluator aliases and outbound URL calls. Python object-access triage follows a request-selected record to its return/send, records input/lookup/disclosure locations and distinguishes narrow owner controls from misleading checks. Unknown schema, sharing intent and external policy remain proof gaps. Lookups without the demonstrated disclosure flow stay separate questions in `security-review-tasks.json`. Comments and constant HTML are distinguished from executable/user-derived sinks in the recognized source forms. See [cybersecurity validation](skills/hydrascan/references/security-validation.md). Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
 
 The text snapshot excludes symlinks, dependency/Git directories, known secret files, binaries and oversized files. Inspect the inventory for actual exclusions. Those omissions, missing runtime artifacts and untested deployed builds remain coverage gaps. Filename filtering does not guarantee that included code contains no secrets; inspect and redact reports and keep raw logs private.
 
@@ -124,6 +135,10 @@ skills/hydrascan/
   agents/openai.yaml
   scripts/hydrascan.py
   scripts/hydrascan_source.py
+  scripts/hydrascan_python_flow.py
+  scripts/hydrascan_javascript.py
+  scripts/hydrascan_js_ast.cjs
+  scripts/javascript-parser/
   references/
     behavioral-probes.md
     coverage.md
@@ -132,6 +147,7 @@ skills/hydrascan/
     reporting.md
     security-validation.md
     engine.md
+    project-analysis.md
     provenance.md
 tests/
   test_native_runner.py
@@ -139,6 +155,9 @@ tests/
   test_source_regressions.py
   test_authorization_flow.py
   test_authorization_regressions.py
+  test_python_project_flow.py
+  test_javascript_ast.py
+  test_project_integration.py
   fixtures/
 ```
 
@@ -150,7 +169,9 @@ To test HydraScan itself from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-These tests verify the runner and source triage, including controls and reviewer-discovered parser regressions; they do not assess another application's security.
+These tests verify the runner and source triage, including controls and reviewer-discovered parser regressions; they do not assess another application's security. AST tests run when the optional pinned parser is installed (or `HYDRASCAN_JS_PARSER_ROOT` identifies its installation); otherwise that test class is explicitly skipped and fallback tests still run.
+
+Revision 2026-10-10.10 passed 157 tooling tests with the optional Babel backend available. Independent synthetic cases exposed misses and false positives that were retained in the evaluation history and addressed with regression tests. Re-running disclosed cases measures regression behavior, not independently demonstrated coverage of other applications.
 
 ## Scope
 
@@ -158,4 +179,4 @@ Active testing uses the established authorized targets and effects, preferably d
 
 Historical inspiration and upstream credits are preserved in the [provenance reference](skills/hydrascan/references/provenance.md). They are not runtime dependencies. HydraScan has its own runner, functional probes, complementary-agent coordination and resumable review records.
 
-Current workflow revision: **2026-10-10.9**.
+Current workflow revision: **2026-10-10.10**.

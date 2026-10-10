@@ -16,10 +16,12 @@ import threading
 import time
 from datetime import datetime, timezone
 
-VERSION = "2026-10-10.9"
+VERSION = "2026-10-10.10"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hydrascan_source import inspect_python, inspect_javascript
+from hydrascan_source import inspect_python
+from hydrascan_python_flow import inspect_project as inspect_python_project
+from hydrascan_javascript import inspect_project as inspect_javascript_project, doctor as javascript_doctor
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", ".cache"}
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -111,47 +113,107 @@ def snapshot(source, destination):
     return {"source": str(source), "fingerprint": fingerprint, "files": included, "excluded": excluded, "bytes": total}
 
 
-def analyze(root, files):
+def analyze(root, files, *, node=None, js_parser_root=None):
     candidates, gaps, review_tasks = [], [], []
+    candidate_indexes, task_ids = {}, set()
+    sources = {item['path']: (root / item['path']).read_text(encoding='utf-8-sig') for item in files}
 
     def add(path, signal):
         line, rule = signal['line'], signal['rule']
         identity = f"{path}:{line}:{signal.get('column', '')}:{rule}"
-        candidates.append({"id": "HS-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
+        candidate = {"id": "HS-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
                            **signal, "path": path, "kind": "security", "proof_state": "candidate",
-                           "proof_gap": "Establish reachable input, effective controls and actual impact; a source signal alone is not a vulnerability."})
+                           "proof_gap": "Establish reachable input, effective controls and actual impact; a source signal alone is not a vulnerability."}
+        if candidate['id'] in candidate_indexes:
+            candidates[candidate_indexes[candidate['id']]] = candidate
+            return
+        candidate_indexes[candidate['id']] = len(candidates)
+        candidates.append(candidate)
+
+    def add_task(path, task):
+        identity = f"{path}:{task['line']}:{task.get('column', '')}:{task['rule']}"
+        task = {"id": "HR-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
+                **task, "path": path, "kind": "review-task"}
+        task.pop('proof_state', None)
+        task.setdefault('question', task.get('detail', task.get('title', 'Review source boundary')))
+        if task['id'] not in task_ids:
+            task_ids.add(task['id'])
+            review_tasks.append(task)
 
     for item in files:
         path = item['path']
-        text = (root / path).read_text(encoding='utf-8-sig')
+        text = sources[path]
         suffix = Path(path).suffix.lower()
         signals = []
         if suffix == '.py':
             try:
                 signals, tasks = inspect_python(text)
                 for task in tasks:
-                    identity = f"{path}:{task['line']}:{task.get('column', '')}:{task['rule']}"
-                    review_tasks.append({"id": "HR-" + hashlib.sha256(identity.encode()).hexdigest()[:12],
-                                         "path": path, "kind": "review-task", **task})
-            except SyntaxError as error:
-                gaps.append({"path": path, "line": error.lineno,
+                    add_task(path, task)
+            except (SyntaxError, RecursionError, ValueError) as error:
+                gaps.append({"path": path, "line": getattr(error, 'lineno', 1),
                              "reason": "Python AST parse failed; inspect the application's supported Python version."})
                 continue
-        elif suffix in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.html', '.vue', '.svelte'}:
-            signals = inspect_javascript(text, html=suffix in {'.html', '.vue', '.svelte'})
-            gaps.append({'path': path, 'line': None, 'reason': 'Lexical/script triage is not a full JS/TS/framework parser: review template interpolation, regex literals, escaped embedded scripts, markup expressions and dynamic dispatch separately.'})
         for signal in signals:
             add(path, signal)
         # Never record matched credentials or code excerpts.
         if suffix in {'.py', '.js', '.ts', '.json', '.yaml', '.yml', '.toml', '.ini'}:
             expression = r"(?i)\b(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)\b[\"']?\s*[:=]\s*[\"']([^\"'\r\n]{12,})[\"']"
-            for match in re.finditer(expression, text):
-                value = match.group(1)
+            if suffix == '.py':
+                credential_values = []
+                names = r'(?i)(?:api_?key|access_?token|password|client_?secret)'
+                for node in ast.walk(ast.parse(text)):
+                    if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant):
+                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        if any(re.fullmatch(names, target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else '') for target in targets):
+                            credential_values.append((node.value.value, node.value.lineno))
+                    elif isinstance(node, ast.Dict):
+                        for key, value in zip(node.keys, node.values):
+                            if isinstance(key, ast.Constant) and isinstance(key.value, str) and re.fullmatch(names, key.value) and isinstance(value, ast.Constant):
+                                credential_values.append((value.value, value.lineno))
+            else:
+                credential_values = [(match.group(1), text.count('\n', 0, match.start()) + 1) for match in re.finditer(expression, text)]
+            for value, line in credential_values:
+                if not isinstance(value, str) or len(value) < 12:
+                    continue
                 if value.startswith(('${', '{{', '<')) or re.search(r'(?i)example|placeholder|your[_-]|changeme', value):
                     continue
-                add(path, {"line": text.count('\n', 0, match.start()) + 1, "rule": "embedded-credential",
+                add(path, {"line": line, "rule": "embedded-credential",
                            "title": "Possible embedded credential (value withheld)", "family": PRIVACY,
                            "method": "literal triage", "detail": "Establish whether this is a credential and who can obtain it; never test it against an unrelated service."})
+    controls = []
+    project_signals, project_gaps, project_tasks = inspect_python_project(
+        {path: text for path, text in sources.items() if Path(path).suffix.lower() == '.py'}, controls_out=controls)
+    controlled = {(item['path'], item['line'], item.get('column', 1), rule)
+                  for item in controls if item.get('status') == 'recognized-control'
+                  for rule in item.get('rules', [])}
+    # Suppression requires a control at the exact sink and all analyzed call contexts.
+    candidates[:] = [item for item in candidates
+                     if (item['path'], item['line'], item.get('column', 1), item['rule']) not in controlled]
+    equivalent = {
+        'python-project-interpreter-input': {'python-dynamic-code', 'python-shell'},
+        'python-project-sql-injection': {'python-sql-composition'},
+        'python-project-object-authorization': {'python-object-authorization'},
+    }
+    replacements = {(signal['path'], signal['line'], signal.get('column', 1), signal['family'], rule)
+                    for signal in project_signals for rule in equivalent.get(signal['rule'], ())}
+    # Richer traces replace local heuristics only at the exact same operation.
+    candidates[:] = [item for item in candidates if
+                     (item['path'], item['line'], item.get('column', 1), item['family'], item['rule']) not in replacements]
+    candidate_indexes = {item['id']: index for index, item in enumerate(candidates)}
+    for signal in project_signals:
+        add(signal['path'], signal)
+    gaps.extend(project_gaps)
+    for task in project_tasks:
+        add_task(task['path'], task)
+    js_sources = {path: text for path, text in sources.items()
+                  if Path(path).suffix.lower() in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.html', '.htm', '.vue', '.svelte'}}
+    js_signals, js_gaps, js_tasks = inspect_javascript_project(js_sources, node=node, parser_root=js_parser_root)
+    for signal in js_signals:
+        add(signal['path'], signal)
+    gaps.extend(js_gaps)
+    for task in js_tasks:
+        add_task(task['path'], task)
     return candidates, gaps, review_tasks
 
 
@@ -384,12 +446,12 @@ def collect(run):
     changes = json.loads((run / "snapshot-changes.json").read_text(encoding="utf-8"))
     body = ["# HydraScan local triage", "", f"Run status: {metadata['status']}. Updated: {stamp()}.",
             f"Source fingerprint: `{inventory['fingerprint']}`.",
-            f"Text files copied: {len(inventory['files'])}; exclusions: {len(inventory['excluded'])}; parse gaps: {len(gaps)}.",
+            f"Text files copied: {len(inventory['files'])}; exclusions: {len(inventory['excluded'])}; analysis gaps: {len(gaps)}.",
             f"Inventoried files changed by check execution: {len(changes)}. Static signals refer to the initial snapshot.",
             f"Candidate signals: {len(candidates)}. Confirmed vulnerabilities: not determined by this runner.", "",
             f"Semantic security review tasks: {len(tasks)}. These are questions, not detected vulnerabilities.", "", "## Candidate signals", "", "| ID | Location | Signal | Proof |", "| --- | --- | --- | --- |"]
     for item in candidates:
-        body.append(f"| {markdown(item['id'])} | {markdown(item['path'])}:{item['line']} | {markdown(item['title'])} | candidate |")
+        body.append(f"| {markdown(item['id'])} | {markdown(item['path'])}:{item['line']}:{item.get('column', 1)} | {markdown(item['title'])} | candidate |")
     if not candidates:
         body.append("| — | — | No supported source signals observed | Broader review still required |")
     body += ["", "## Semantic security review tasks", "", "| Location | Required review |", "| --- | --- |"]
@@ -403,7 +465,7 @@ def collect(run):
     if not checks:
         body.append("| — | not-run | — | No explicit check commands supplied |")
     body += ["", "## Coverage limits", "",
-             "Signals cover selected local Python assignment flows and JavaScript/TypeScript/HTML lexical patterns only. They are hypotheses, not reachability or exploit proof.",
+             "Signals use bounded Python project AST flow and optional JavaScript/TypeScript Babel AST flow. Missing or failed JS parsing retains lexical fallback with explicit gaps. Signals remain hypotheses, not reachability or exploit proof.",
              "Command success does not establish app correctness or security. Review inventory.json exclusions and analysis-gaps.json before interpreting results.",
              "No live targets, authorization flows, package advisories or production builds were tested automatically. Agent-owned coverage and independent validation are still required."]
     update_generated(run / "report.md", "\n".join(body), "## Validated agent findings\n\nRecord evidence-backed findings here, outside the generated markers.")
@@ -412,7 +474,7 @@ def collect(run):
     return {"run": str(run), "status": metadata["status"], "candidates": len(candidates), "review_tasks": len(tasks), "checks": len(checks), "report": str(run / "report.md")}
 
 
-def scan(source, run, checks_path=None):
+def scan(source, run, checks_path=None, *, node=None, js_parser_root=None):
     source, run = source.resolve(), run.resolve()
     if not source.is_dir():
         raise ValueError("source must be an existing directory")
@@ -421,13 +483,14 @@ def scan(source, run, checks_path=None):
     checks = load_checks(checks_path)
     run.mkdir(parents=True, exist_ok=False)
     metadata = {"version": VERSION, "created": stamp(), "status": "running", "source": str(source),
-                "snapshot": "snapshot", "network_testing": "not performed by runner"}
+                "snapshot": "snapshot", "network_testing": "not performed by runner",
+                "javascript_backend": javascript_doctor(node=node, parser_root=js_parser_root)}
     write_json(run / "run.json", metadata)
     inventory = None
     try:
         inventory = snapshot(source, run / "snapshot")
         write_json(run / "inventory.json", inventory)
-        candidates, gaps, tasks = analyze(run / "snapshot", inventory["files"])
+        candidates, gaps, tasks = analyze(run / "snapshot", inventory["files"], node=node, js_parser_root=js_parser_root)
         write_json(run / "candidates.json", candidates)
         write_json(run / "analysis-gaps.json", gaps)
         write_json(run / "security-review-tasks.json", tasks)
@@ -451,11 +514,15 @@ def scan(source, run, checks_path=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="HydraScan independent local review runner (no external security engine).")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("doctor", help="show runtime availability; performs no installs or scans")
+    doctor = commands.add_parser("doctor", help="show runtime availability; performs no installs or scans")
+    doctor.add_argument("--node", type=Path, help="explicit Node executable for optional JS AST")
+    doctor.add_argument("--js-parser-root", type=Path, help="trusted parser installation containing node_modules")
     review = commands.add_parser("scan", help="copy bounded source, triage signals and run explicitly supplied checks")
     review.add_argument("source", type=Path)
     review.add_argument("--output", required=True, type=Path, help="new run directory outside source")
     review.add_argument("--checks", type=Path, help="explicit JSON list of authorized argv commands")
+    review.add_argument("--node", type=Path, help="explicit Node executable for optional JS AST")
+    review.add_argument("--js-parser-root", type=Path, help="trusted parser installation containing node_modules")
     report = commands.add_parser("collect", help="refresh generated reports while retaining agent notes")
     report.add_argument("run", type=Path)
     args = parser.parse_args(argv)
@@ -463,9 +530,10 @@ def main(argv=None):
         if args.command == "doctor":
             result = {"version": VERSION, "python": sys.version.split()[0], "ready": sys.version_info >= (3, 10),
                       "external_engine_required": False, "extra_packages_required": [],
+                      "javascript_ast": javascript_doctor(node=args.node, parser_root=args.js_parser_root),
                       "agent_execution": "provided by the host; runner does not spawn model agents"}
         elif args.command == "scan":
-            result = scan(args.source, args.output, args.checks)
+            result = scan(args.source, args.output, args.checks, node=args.node, js_parser_root=args.js_parser_root)
         else:
             result = collect(args.run.resolve())
         print(json.dumps(result, ensure_ascii=False))
