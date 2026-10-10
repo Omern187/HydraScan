@@ -24,7 +24,8 @@ Ask Codex:
 
 ```text
 Use $skill-installer to install
-Omern187/HydraScan at skills/hydrascan.
+Omern187/HydraScan at
+skills/hydrascan.
 ```
 
 <details>
