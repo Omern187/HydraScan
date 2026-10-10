@@ -1,19 +1,29 @@
-# HydraScan
+<div align="center">
 
-A native review runner and multi-agent skill for finding logic bugs, broken workflows, and security vulnerabilities in apps and websites, with evidence validation and coverage tracking.
+![HydraScan — Find the fault. Follow the evidence.](assets/hydrascan-banner.svg)
 
-HydraScan uses its own Python standard-library runner to inventory source, prepare a bounded text snapshot, surface static candidates, run explicitly selected checks and save review artifacts. A coding agent coordinates complementary reviewers, independently challenges consequential findings and produces a single report with evidence and remaining gaps. It works without a separate scanner engine.
+**Find logic bugs, broken workflows and security vulnerabilities in apps and websites.**
 
-## What it reviews
+Complementary reviewers. Traceable evidence. Reviews you can resume.
 
-- **Functional correctness:** calculations, state transitions, imports/exports, concurrency, persistence, startup failures, errors and recovery.
-- **Input handling:** query, command and template injection, XSS, SSRF, paths, files, archives and parser boundaries.
-- **Identity and trust:** authentication, authorization, tenant isolation, sessions, data exposure, API contracts and native bridges.
-- **Runtime and distribution:** alternate launchers, release assets, dependencies, resource limits, deployment configuration and Electron boundaries.
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3572A5?style=flat-square)
+![Native engine](https://img.shields.io/badge/Engine-native-207e69?style=flat-square)
+![Optional Babel AST](https://img.shields.io/badge/JS%2FTS-Babel_AST_optional-477d9c?style=flat-square)
+![Workflow revision](https://img.shields.io/badge/Revision-2026--10--10.10-586579?style=flat-square)
 
-The workflow applies to source review, disposable local tests, authorized staging assessments, finding triage and requested remediation. The base runner needs Python 3.10+ and no third-party Python packages. Full JS/TS/JSX AST analysis optionally uses Node and the pinned Babel parser; the CLI reports when it falls back to limited lexical analysis. Semantic review uses the host coding agent; the CLI alone does not launch AI agents or autonomously discover every kind of defect.
+[Quick start](#quick-start) · [Coverage](#coverage) · [Agents](#agents) · [Validation](#validation) · [Documentation](#documentation)
 
-## Install
+</div>
+
+---
+
+HydraScan combines a native Python review runner with a multi-agent skill. The runner inventories source, creates a bounded text snapshot, surfaces static candidates and saves review artifacts. Your coding agent coordinates reviewers, validates findings and produces a report with evidence and remaining gaps.
+
+The base runner uses Python's standard library. No separate scanner engine, Docker, provider account or API key is required. Full JS/TS/JSX AST analysis optionally uses Node and the pinned Babel parser. Semantic review and agent delegation are provided by the host coding agent; the CLI does not launch model agents.
+
+## Quick start
+
+### 1. Install the skill
 
 In Codex, ask the skill installer:
 
@@ -21,11 +31,15 @@ In Codex, ask the skill installer:
 Use $skill-installer to install the skill from Omern187/HydraScan at skills/hydrascan.
 ```
 
-The installable skill is [skills/hydrascan](skills/hydrascan). For manual installation, copy that folder into your skills directory as `hydrascan` (normally `~/.codex/skills/hydrascan`, or `$CODEX_HOME/skills/hydrascan` when configured). The skill entrypoint is [SKILL.md](skills/hydrascan/SKILL.md).
+For manual installation, copy the entire [skills/hydrascan](skills/hydrascan) folder into your skills directory as `hydrascan`, normally `~/.codex/skills/hydrascan` or `$CODEX_HOME/skills/hydrascan`. The skill is available on the next turn.
 
-The installed skill is available on the next turn. Multi-agent execution requires a host that supports delegation; otherwise the applicable review lanes run sequentially and that limitation is reported. No Docker, separate provider account or API key is required by the native runner.
+### 2. Start a review
 
-## Run the native CLI
+```text
+Use $hydrascan to review this app for logic bugs, broken workflows and security vulnerabilities. Use complementary agents, reproduce important findings with synthetic data, and save findings, coverage and a continuation checkpoint.
+```
+
+### 3. Run the native CLI
 
 From a checkout of this repository:
 
@@ -35,7 +49,26 @@ python skills/hydrascan/scripts/hydrascan.py scan /path/to/app --output /path/to
 python skills/hydrascan/scripts/hydrascan.py collect /path/to/new-run
 ```
 
-Use a new run directory outside the reviewed source. For an installed skill, use the script under that skill's installed directory. `scan` creates inventory, candidates, check outcomes, a 32-family coverage ledger, a Markdown report and a continuation checkpoint. `collect` refreshes saved summaries while preserving manual notes; it does not re-test or scan changed source.
+Use a new run directory outside the reviewed source. For an installed skill, use the script inside the installed folder. `scan` creates inventory, candidates, check outcomes, coverage, a Markdown report and a continuation checkpoint. `collect` refreshes summaries while preserving manual notes; it does not re-test changed source.
+
+<details>
+<summary><strong>Enable optional JavaScript / TypeScript AST analysis</strong></summary>
+
+Install the pinned parser in HydraScan's trusted runtime, separately from the reviewed app. Use a Node version supported by [the parser manifest](skills/hydrascan/scripts/javascript-parser/package.json).
+
+```text
+npm ci --prefix skills/hydrascan/scripts/javascript-parser
+python skills/hydrascan/scripts/hydrascan.py doctor
+```
+
+For a separate parser installation, pass `--js-parser-root /path/to/parser-runtime` to `doctor` and `scan`, or set `HYDRASCAN_JS_PARSER_ROOT`. That directory must contain the installed `node_modules`. Select a Node executable with `--node` or `HYDRASCAN_NODE`.
+
+The runner never installs packages automatically or loads the target app's parser configuration. Missing parsers, parse failures and resource bounds are recorded in `analysis-gaps.json`. Limited lexical fallback does not count as AST coverage.
+
+</details>
+
+<details>
+<summary><strong>Run explicitly selected application checks</strong></summary>
 
 Application commands execute only when supplied through `--checks /path/to/checks.json`. For example:
 
@@ -49,134 +82,123 @@ Application commands execute only when supplied through `--checks /path/to/check
 ]
 ```
 
-Checks run sequentially in the snapshot with argument arrays and no shell. Inspect the code and selected commands first: the snapshot is **not an OS/network sandbox**, and check processes can access the host environment, filesystem and network. Use an appropriately contained disposable environment for untrusted execution. See [native runner details](skills/hydrascan/references/engine.md).
-
-## Optional JavaScript/TypeScript AST
-
-Install the pinned parser in HydraScan's own trusted runtime, separately from the reviewed application. Use a Node version supported by [the parser manifest](skills/hydrascan/scripts/javascript-parser/package.json):
-
 ```text
-npm ci --prefix skills/hydrascan/scripts/javascript-parser
-python skills/hydrascan/scripts/hydrascan.py doctor
+python skills/hydrascan/scripts/hydrascan.py scan /path/to/app --output /path/to/new-run --checks /path/to/checks.json
 ```
 
-For an isolated installation elsewhere, pass `--js-parser-root /path/to/parser-runtime` to `doctor` and `scan`, or set `HYDRASCAN_JS_PARSER_ROOT`. That directory must contain the installed `node_modules`. Select an explicit Node executable with `--node` or `HYDRASCAN_NODE`. The runner never installs packages automatically or loads the target application's parser configuration. A missing parser, parse failure or resource bound is recorded in `analysis-gaps.json`; fallback output does not count as AST coverage.
+Checks run sequentially in the snapshot with argument arrays and no shell. Inspect the code and selected commands first: the snapshot is **not an OS/network sandbox**. Check processes can access the host environment, filesystem and network. Use an appropriately contained disposable environment for untrusted execution. See [runner details](skills/hydrascan/references/engine.md).
 
-## Use
+</details>
 
-Review the current project:
+## Coverage
 
-```text
-Use $hydrascan to review this app for logic bugs, broken workflows and security vulnerabilities. Use complementary agents, reproduce important findings with synthetic data, and save findings, coverage and a continuation checkpoint.
+| Review angle | What reviewers investigate |
+| --- | --- |
+| **Logic & workflows** | Wrong results, state transitions, imports/exports, races, persistence, errors and recovery. |
+| **Input & interpreters** | Query, command and template injection, XSS, SSRF, paths, files, archives and parser boundaries. |
+| **Identity & trust** | Authentication, authorization, owner/tenant isolation, sessions, data exposure and API/IPC contracts. |
+| **Runtime & distribution** | Alternate launchers, release assets, dependencies, resource limits, deployment and Electron boundaries. |
+
+Native triage includes bounded Python cross-file flow, selected SQL/ORM read/write/delete authorization paths and optional JS/TS/JSX AST signals. Traces retain caller and sink locations. Unknown schema, sharing intent and external policy remain explicit proof gaps; unresolved access questions go into `security-review-tasks.json`.
+
+The **32-family coverage ledger** starts as `not-started` or `partial`. Reviewers must supply relevant evidence before advancing coverage. Static signals and process exit codes alone do not establish a vulnerability or a clean application. See [project analysis](skills/hydrascan/references/project-analysis.md).
+
+## Agents
+
+```mermaid
+flowchart LR
+    A[Pin source and scope] --> B[Native triage]
+    B --> C[Logic reviewer]
+    B --> D[Input reviewer]
+    B --> E[Identity reviewer]
+    B --> F[Runtime reviewer]
+    C --> G[Independent validation]
+    D --> G
+    E --> G
+    F --> G
+    G --> H[Findings, coverage and checkpoint]
 ```
 
-Review a GitHub revision:
+| Role | Responsibility |
+| --- | --- |
+| **Coordinator** | Pins the revision, assigns coverage, merges evidence and tracks open work. |
+| **Logic reviewer** | Challenges results, journeys, asynchronous state and failure recovery. |
+| **Input reviewer** | Traces untrusted input into interpreters, renderers, files and outbound requests. |
+| **Identity reviewer** | Compares roles and tenants across reads, writes, exports, jobs and trust boundaries. |
+| **Runtime reviewer** | Examines startup variants, protocols, dependencies and distribution boundaries. |
+| **Independent validator** | Attempts to reproduce or disprove consequential findings. |
+
+Reviewers receive different angles, the same pinned source and private test resources. Initial discovery does not receive another reviewer's conclusions. Shared mutable tests are coordinated to avoid interference.
+
+Roles run within the host's actual limits, using later waves where needed. A host without delegation runs review lanes sequentially and reports that limitation. Every requested coverage family and critical journey gets an owner; agreement between agents does not prove complete coverage. See the [multi-agent workflow](skills/hydrascan/references/multi-agent-review.md).
+
+## Evidence you can follow
+
+Each accepted finding records its source/build, preconditions, expected versus observed behavior, impact, reproduction or source trace, controls and proposed fix. Reports separate functional defects, security vulnerabilities and hardening observations.
+
+| Proof state | What it means |
+| --- | --- |
+| `candidate` | Plausible concern with a named evidence or product-intent gap. |
+| `source-confirmed` | Established by a complete reachable source trace. |
+| `dynamic-confirmed` | Observed through a tested runtime or component, with substitutions disclosed. |
+| `hardening` | An improvement without an established exploitable defect. |
+
+Runs save inventory, candidates, analysis gaps, check results, coverage, a report and `review-state.md`. The checkpoint preserves scope, agent ownership, evidence, resources and open work. Passing existing tests does not clear untested paths; a passing bug demonstration does not verify a fix.
+
+<details>
+<summary><strong>Copy a prompt: GitHub review, resume or remediation</strong></summary>
+
+**Review a GitHub revision**
 
 ```text
 Use $hydrascan to review owner/repository from GitHub. Pin the current main commit and use an isolated checkout of that revision. Review imports, exports, authorization and asynchronous state, and report tested paths and remaining gaps.
 ```
 
-Continue an existing assessment:
+**Continue an assessment**
 
 ```text
 Use $hydrascan to continue the assessment from review-state.md. Verify the source revision, resume open coverage and candidates, and independently challenge consequential findings.
 ```
 
-Apply fixes when desired:
+**Fix confirmed findings**
 
 ```text
 Use $hydrascan to fix the confirmed findings in the saved report. Patch the root causes and verify the intended behavior with meaningful regression checks.
 ```
 
-## How the agents work
+</details>
 
-| Role | Responsibility |
-| --- | --- |
-| Coordinator | Pins the revision and scope, inventories entrypoints, assigns coverage, merges evidence and tracks gaps. |
-| Logic reviewer | Looks for wrong results, broken journeys, races, stale state, persistence failures and bad recovery. |
-| Input reviewer | Traces untrusted input into interpreters, renderers, files, parsers and outbound requests. |
-| Identity reviewer | Compares roles and tenants across reads, writes, exports, jobs and API/IPC boundaries. |
-| Runtime reviewer | Checks startup variants, protocol handling, dependencies, resource limits and distribution boundaries. |
-| Independent validator | Attempts to reproduce or disprove consequential findings from another reviewer. |
+## Validation
 
-Roles are scheduled within the host's actual limits. For example, four total slots allow a coordinator and three reviewers at once; runtime work and independent validation can use later waves. The coordinator can own a lane when the team is small.
+Workflow revision **2026-10-10.10** passed **157 tooling tests** with the optional Babel backend available. These tests verify HydraScan's runner and source triage, including controls and parser regressions; they do not assess another app's security.
 
-Reviewers receive different angles, the same pinned source, and private test resources. They do not receive another discoverer's conclusions during initial discovery. Shared mutable checks are coordinated so that accidental test interference is not mistaken for a product bug.
-
-The coordinator assigns every requested coverage family and critical journey an owner. A completed agent task or a unanimous opinion is not proof of complete coverage. See the [multi-agent workflow](skills/hydrascan/references/multi-agent-review.md).
-
-## Evidence and deliverables
-
-The report separates functional defects, security vulnerabilities and hardening observations. Findings use explicit proof states:
-
-- `dynamic-confirmed`: observed through the tested runtime or component, with substitutions disclosed.
-- `source-confirmed`: established by a complete reachable source trace.
-- `candidate`: plausible, with a named evidence or product-intent gap.
-- `hardening`: an improvement without an established exploitable defect.
-
-Each accepted finding records the source/build, preconditions, expected versus observed behavior, impact, reproduction or trace, controls and proposed fix. The report also records checked and untested paths. A continuation checkpoint preserves scope, agent ownership, evidence, resources and open work.
-
-Important probes include out-of-order file loads, generated artifact inspection, failures hidden by success messages, special object keys, streamed Unicode, encoded identifiers, rejected imports and concurrent shared-file writes. Select probes that match the actual architecture. Passing existing tests does not clear untested failure paths, and a passing bug-demonstration script does not verify a fix.
-
-## What the runner establishes
-
-Local Python and bounded cross-file AST flow, selected SQL/ORM authorization boundaries, and optional JS/TS/JSX Babel AST signals are candidates requiring review of reachability, controls and impact. Cross-file traces include caller and sink locations. Authorization review covers selected read/write/delete paths and exact owner/tenant controls; admin route policy remains a reviewer question. See [project analysis details](skills/hydrascan/references/project-analysis.md). Triage includes composed queries, variable path segments, TAR extraction, evaluator aliases and outbound URL calls. Python object-access triage follows a request-selected record to its return/send, records input/lookup/disclosure locations and distinguishes narrow owner controls from misleading checks. Unknown schema, sharing intent and external policy remain proof gaps. Lookups without the demonstrated disclosure flow stay separate questions in `security-review-tasks.json`. Comments and constant HTML are distinguished from executable/user-derived sinks in the recognized source forms. See [cybersecurity validation](skills/hydrascan/references/security-validation.md). Passing or failing a process check is execution evidence, not proof of a vulnerability or a clean application. The preliminary coverage ledger stays `not-started` or `partial` until reviewers supply relevant evidence.
-
-The text snapshot excludes symlinks, dependency/Git directories, known secret files, binaries and oversized files. Inspect the inventory for actual exclusions. Those omissions, missing runtime artifacts and untested deployed builds remain coverage gaps. Filename filtering does not guarantee that included code contains no secrets; inspect and redact reports and keep raw logs private.
-
-HydraScan does not install project dependencies, auto-run discovered commands, perform built-in HTTP scans, call hosted model providers or upload source. Host agents can test authorized local/staging behavior with available tools and incorporate the evidence into the same assessment.
-
-## Repository contents
-
-```text
-README.md
-skills/hydrascan/
-  SKILL.md
-  agents/openai.yaml
-  scripts/hydrascan.py
-  scripts/hydrascan_source.py
-  scripts/hydrascan_python_flow.py
-  scripts/hydrascan_javascript.py
-  scripts/hydrascan_js_ast.cjs
-  scripts/javascript-parser/
-  references/
-    behavioral-probes.md
-    coverage.md
-    functional-bugs.md
-    multi-agent-review.md
-    reporting.md
-    security-validation.md
-    engine.md
-    project-analysis.md
-    provenance.md
-tests/
-  test_native_runner.py
-  test_source_review.py
-  test_source_regressions.py
-  test_authorization_flow.py
-  test_authorization_regressions.py
-  test_python_project_flow.py
-  test_javascript_ast.py
-  test_project_integration.py
-  fixtures/
-```
-
-This repository contains the native runner, source triage, review instructions, UI metadata and regression tests. Private application reports, credentials and generated application binaries are not included.
-
-To test HydraScan itself from the repository root:
+Run the suite from the repository root:
 
 ```text
 python -m unittest discover -s tests -v
 ```
 
-These tests verify the runner and source triage, including controls and reviewer-discovered parser regressions; they do not assess another application's security. AST tests run when the optional pinned parser is installed (or `HYDRASCAN_JS_PARSER_ROOT` identifies its installation); otherwise that test class is explicitly skipped and fallback tests still run.
+AST tests run when the pinned parser is installed or `HYDRASCAN_JS_PARSER_ROOT` identifies it. Otherwise that test class is explicitly skipped and fallback tests still run.
 
-Revision 2026-10-10.10 passed 157 tooling tests with the optional Babel backend available. Independent synthetic cases exposed misses and false positives that were retained in the evaluation history and addressed with regression tests. Re-running disclosed cases measures regression behavior, not independently demonstrated coverage of other applications.
+Independent synthetic cases exposed misses and false positives, retained in the evaluation history and addressed with regression tests. Re-running disclosed cases measures regression behavior, not independently demonstrated coverage of other applications.
 
-## Scope
+## Documentation
 
-Active testing uses the established authorized targets and effects, preferably disposable local instances or staging with synthetic data. A review request does not authorize production changes, additional hosts, paid/cloud runs or external reporting. The final report states actual coverage and remaining gaps; HydraScan does not guarantee discovery of every vulnerability or certify compliance.
+| Guide | Read it for |
+| --- | --- |
+| [Skill entrypoint](skills/hydrascan/SKILL.md) | The complete review workflow and activation instructions. |
+| [Native runner](skills/hydrascan/references/engine.md) | CLI behavior, snapshots, checks and saved artifacts. |
+| [Project analysis](skills/hydrascan/references/project-analysis.md) | Supported source forms, flow analysis and limitations. |
+| [Multi-agent review](skills/hydrascan/references/multi-agent-review.md) | Review lanes, scheduling and independent validation. |
+| [Coverage ledger](skills/hydrascan/references/coverage.md) | Risk families, ownership and remaining gaps. |
+| [Security validation](skills/hydrascan/references/security-validation.md) | Evidence requirements and controls for security findings. |
+| [Functional bugs](skills/hydrascan/references/functional-bugs.md) · [Behavioral probes](skills/hydrascan/references/behavioral-probes.md) | Workflow failures and architecture-specific experiments. |
+| [Reporting](skills/hydrascan/references/reporting.md) | Finding structure, proof states and continuation records. |
 
-Historical inspiration and upstream credits are preserved in the [provenance reference](skills/hydrascan/references/provenance.md). They are not runtime dependencies. HydraScan has its own runner, functional probes, complementary-agent coordination and resumable review records.
+---
 
-Current workflow revision: **2026-10-10.10**.
+Active testing uses established authorized targets and effects, preferably disposable local instances or staging with synthetic data. A review request does not authorize production changes, additional hosts, paid/cloud runs or external reporting. Reports state actual coverage and remaining gaps; HydraScan does not guarantee discovery of every vulnerability or certify compliance.
+
+The snapshot excludes links, dependency/Git directories, known secret files, binaries and oversized files. Review the inventory for actual exclusions, redact sensitive reports and keep raw logs private. Filename filtering does not guarantee that included code contains no secrets. The runner does not auto-install project dependencies, auto-run discovered commands, perform built-in HTTP scans, call model providers or upload source. Host agents can incorporate authorized local/staging tests into the assessment.
+
+Historical inspiration and credits are recorded in [provenance](skills/hydrascan/references/provenance.md). They are not runtime dependencies.

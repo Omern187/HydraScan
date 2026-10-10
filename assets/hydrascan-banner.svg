@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">HydraScan — multi-agent application review</title>
+  <desc id="desc">Turquoise branching paths represent complementary reviewers. Find the fault. Follow the evidence.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1"><stop stop-color="#081321"/><stop offset="1" stop-color="#0e2636"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#58d6dd"/><stop offset="1" stop-color="#8bf6b9"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#2edab3" stop-opacity=".12"/><stop offset="1" stop-color="#2edab3" stop-opacity="0"/></radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#c7ebff" stroke-opacity=".035"/></pattern>
+  </defs>
+  <rect width="1280" height="360" rx="20" fill="url(#background)"/>
+  <rect width="1280" height="360" rx="20" fill="url(#grid)"/>
+  <ellipse cx="1010" cy="175" rx="300" ry="240" fill="url(#glow)"/>
+  <path d="M48 42H78" stroke="#75f3c2" stroke-width="3" stroke-linecap="round"/>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="94" y="47" fill="#8aa4b8" font-size="13" font-weight="600" letter-spacing="2.5">MULTI-AGENT APPLICATION REVIEW</text>
+    <text x="48" y="156" fill="#f3f8fc" font-size="76" font-weight="700" letter-spacing="-3">HydraScan</text>
+    <text x="51" y="205" fill="#c0d1dc" font-size="25">Find the fault. Follow the evidence.</text>
+    <g font-size="11" font-weight="600" letter-spacing="2">
+      <rect x="50" y="264" width="92" height="30" rx="15" fill="#142c3c" stroke="#2c4858"/><text x="72" y="284" fill="#a8cadb">LOGIC</text>
+      <rect x="154" y="264" width="118" height="30" rx="15" fill="#142c3c" stroke="#2c4858"/><text x="173" y="284" fill="#a8cadb">SECURITY</text>
+      <rect x="284" y="264" width="122" height="30" rx="15" fill="#14352f" stroke="#2b6956"/><text x="302" y="284" fill="#88efbe">EVIDENCE</text>
+    </g>
+  </g>
+  <g transform="translate(1020 180)">
+    <circle r="126" fill="none" stroke="#73d7d0" stroke-opacity=".09"/>
+    <circle r="96" fill="none" stroke="#73d7d0" stroke-opacity=".12" stroke-dasharray="3 9"/>
+    <path d="M0 67V25C0 1-28-8-53-8S-83-20-83-50V-70M0 25V-83M0 25C0 1 28-8 53-8S83-20 83-50V-70" fill="none" stroke="url(#accent)" stroke-width="9" stroke-linecap="round"/>
+    <g fill="#0c202d" stroke="url(#accent)" stroke-width="3.5">
+      <path d="M-83-105L-60-89V-70L-83-55L-106-70V-89Z"/>
+      <path d="M0-123L23-107V-88L0-73L-23-88V-107Z"/>
+      <path d="M83-105L106-89V-70L83-55L60-70V-89Z"/>
+    </g>
+    <g fill="#a4f9d2"><circle cx="-83" cy="-80" r="5"/><circle cy="-98" r="5"/><circle cx="83" cy="-80" r="5"/></g>
+    <path d="M-32 64L0 49L32 64V95L0 113L-32 95Z" fill="#123d38" stroke="#79e7c7" stroke-width="2"/>
+    <path d="M-12 79L-2 89L16 71" fill="none" stroke="#b3fbd8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M-135 30H-103M103 30H135M-120 83H-90M90 83H120" stroke="#6ccdbd" stroke-opacity=".25" stroke-width="2"/>
+  </g>
+</svg>
