@@ -153,7 +153,7 @@ function analyze(parser, input) {
     const file = {path: rawPath.replace(/\\/g, '/'), source, functions: new Map(), exports: new Map(), env: new Map()};
     try {
       const isTS = /\.(?:[cm]?ts|tsx|vue|svelte)$/i.test(file.path);
-      const plugins = [ ...(isTS ? ['typescript'] : []), ...(/\.(?:jsx|tsx|js|mjs|cjs)$/i.test(file.path) ? ['jsx'] : []) ];
+      const plugins = [ 'decorators-legacy', ...(isTS ? ['typescript'] : []), ...(/\.(?:jsx|tsx|js|mjs|cjs)$/i.test(file.path) ? ['jsx'] : []) ];
       file.ast = parser.parse(source, {sourceType: 'unambiguous', plugins, errorRecovery: false,
         attachComment: false, createImportExpressions: true});
       let count = 0; walk(file.ast, node => {

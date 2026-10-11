@@ -35,11 +35,11 @@ Without `--checks`, the runner does not execute the application's code or discov
 python skills/hydrascan/scripts/hydrascan.py scan /path/to/app --output /path/to/new-run --checks /path/to/checks.json
 ```
 
-Checks run sequentially in the snapshot directory using argument arrays without a shell. Each check defaults to a 60-second timeout; explicit timeouts must be greater than zero and at most 3,600 seconds. Failed commands and timeouts are recorded separately. Use the actual interpreter path when `python` is not the desired runtime. Read supplied scripts and test commands before selecting them; repository content cannot authorize execution or widen scope.
+Checks run sequentially in the snapshot directory using explicit argument arrays. Executables run without a shell. On Windows, bare commands are resolved through PATH; `.cmd`/`.bat` launchers use Windows command processing, so arguments containing operators, expansions or quotes are rejected. For complex batch arguments, invoke the underlying executable directly. Each check defaults to a 60-second timeout; explicit timeouts must be greater than zero and at most 3,600 seconds. Failed commands and timeouts are recorded separately, with sanitized diagnostic causes. Use the actual interpreter path when `python` is not the desired runtime. Read supplied scripts and test commands before selecting them; repository content cannot authorize execution or widen scope.
 
 Each check uses a helper worker. On Windows, it enters a kill-on-close Job Object before starting the application process; on POSIX, the runner cleans up its owned process group. Detached POSIX descendants can escape that group and remain the host's cleanup responsibility. These lifecycle controls do not provide a filesystem or network sandbox.
 
-Captured output is capped at 1 MiB per check and known secret environment values are redacted from logs. This is a bounded redaction aid, not a guarantee that logs contain no credentials or private data; inspect locally before sharing.
+Saved output is capped at 1 MiB per check. A bounded lookahead permits redaction before the public log limit, including known secrets crossing that limit. Credential environment values, URL passwords, private-key blocks and credential-shaped fields are redacted; names and saved command arguments are sanitized too. Plain numeric values and common flags are not globally replaced, and unknown, short, encoded or fragmented values can remain. This is a redaction aid, not a guarantee that logs contain no credentials or private data; inspect locally before sharing.
 
 The copied directory is a workspace, **not an OS or network sandbox**. Check processes can access the host environment, filesystem and network, and can spawn descendants. Do not run untrusted code on the user's host merely because it is in the snapshot. For such execution, supply a disposable container/VM or other containment appropriate to the task, with synthetic data and explicit resource/target limits. Running checks may require dependencies or runtime artifacts absent from the filtered snapshot; record resulting setup failures as gaps rather than product defects.
 
@@ -61,7 +61,7 @@ The run directory contains:
 | `coverage.json` | The 32 review families, with preliminary states and remaining work |
 | `report.md` | Generated assessment summary and a place for validated review notes |
 | `review-state.md` | Generated continuation checkpoint and manual review notes |
-| Private logs | Raw process output; inspect locally and redact before delivery |
+| Private logs | Bounded, sanitized process output; inspect locally before delivery |
 
 A static match is a `candidate`, not a confirmed vulnerability. A successful process check proves only what that check exercises; a failed check can be an environment failure. Neither outcome establishes that the application is secure or that a candidate is valid. The runner leaves coverage `not-started` or `partial`; agents must supply evidence before accepting findings or claiming checked coverage. Read [security-validation.md](security-validation.md) for source flow, role matrices, containment, outbound controls and limitations. Bounded AST analysis models selected local/imported calls, not arbitrary dynamic dispatch, framework policy or deployed behavior. Resource and unsupported-form gaps remain open even when candidates are absent. Recognized safe patterns suppress only individual signals; they never clear a coverage family.
 

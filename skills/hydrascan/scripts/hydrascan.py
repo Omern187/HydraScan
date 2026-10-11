@@ -9,14 +9,16 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import unquote, urlsplit
 
-VERSION = "2026-10-10.11"
+VERSION = "2026-10-11.1"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hydrascan_source import inspect_python
@@ -45,10 +47,16 @@ def write_json(path, data):
 
 
 def secret_file(name):
-    lower = name.lower()
+    lower = name.lower().replace('\\', '/')
+    base = lower.rsplit('/', 1)[-1]
+    if lower.endswith('/.docker/config.json') or lower == '.docker/config.json':
+        return True
+    lower = base
     return (lower.startswith(".env") and lower not in {".env.example", ".env.sample", ".env.template"}) or lower in {
-        "id_rsa", "id_ed25519", ".npmrc", ".pypirc", "credentials", "credentials.json",
-    } or lower.endswith((".key", ".pem", ".p12", ".pfx"))
+        "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", ".npmrc", ".pypirc", "credentials", "credentials.json",
+        ".netrc", "_netrc", ".git-credentials", ".pgpass", ".htpasswd", "service-account.json",
+        "secrets.json", "secrets.yaml", "secrets.yml", "wp-config.php",
+    } or lower.endswith((".key", ".pem", ".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfstate.backup"))
 
 
 def is_link(path):
@@ -84,8 +92,10 @@ def snapshot(source, destination):
             try:
                 if is_link(path) or not path.is_file():
                     reason = "link or nonregular file"
-                elif secret_file(name):
+                elif secret_file(relative):
                     reason = "credential file"
+                elif path.stat().st_nlink > 1:
+                    reason = "hard-linked file"
                 elif len(included) >= MAX_FILES:
                     reason = "file-count limit"
                 else:
@@ -152,27 +162,18 @@ def analyze(root, files, *, node=None, js_parser_root=None):
                     add_task(path, task)
             except (SyntaxError, RecursionError, ValueError) as error:
                 gaps.append({"path": path, "line": getattr(error, 'lineno', 1),
-                             "reason": "Python AST parse failed; inspect the application's supported Python version."})
-                continue
+                             "column": 1, "rule": "python-parse-error", "title": "Python AST parse failed",
+                             "family": "Source analysis coverage", "method": "Python AST",
+                             "detail": "Inspect the application's supported Python version; lexical credential triage still runs."})
+        elif suffix in {'.php', '.go', '.java', '.rb', '.cs', '.rs', '.c', '.cpp', '.swift', '.kt', '.sh', '.ps1'}:
+            gaps.append({"path": path, "line": 1, "column": 1, "rule": "unsupported-source-language",
+                         "title": "Source language has no native analyzer", "family": "Source analysis coverage",
+                         "method": "inventory", "detail": "Assign source and behavior review for this language; no native security analysis was performed."})
         for signal in signals:
             add(path, signal)
         # Never record matched credentials or code excerpts.
-        if suffix in {'.py', '.js', '.ts', '.json', '.yaml', '.yml', '.toml', '.ini'}:
-            expression = r"(?i)\b(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)\b[\"']?\s*[:=]\s*[\"']([^\"'\r\n]{12,})[\"']"
-            if suffix == '.py':
-                credential_values = []
-                names = r'(?i)(?:api_?key|access_?token|password|client_?secret)'
-                for ast_node in ast.walk(ast.parse(text)):
-                    if isinstance(ast_node, (ast.Assign, ast.AnnAssign)) and isinstance(ast_node.value, ast.Constant):
-                        targets = ast_node.targets if isinstance(ast_node, ast.Assign) else [ast_node.target]
-                        if any(re.fullmatch(names, target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else '') for target in targets):
-                            credential_values.append((ast_node.value.value, ast_node.value.lineno))
-                    elif isinstance(ast_node, ast.Dict):
-                        for key, value in zip(ast_node.keys, ast_node.values):
-                            if isinstance(key, ast.Constant) and isinstance(key.value, str) and re.fullmatch(names, key.value) and isinstance(value, ast.Constant):
-                                credential_values.append((value.value, value.lineno))
-            else:
-                credential_values = [(match.group(1), text.count('\n', 0, match.start()) + 1) for match in re.finditer(expression, text)]
+        if suffix in {'.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.properties'} or Path(path).name == 'Dockerfile':
+            credential_values = credentials(text, python=suffix == '.py')
             for value, line in credential_values:
                 if not isinstance(value, str) or len(value) < 12:
                     continue
@@ -215,6 +216,36 @@ def analyze(root, files, *, node=None, js_parser_root=None):
     for task in js_tasks:
         add_task(task['path'], task)
     return candidates, gaps, review_tasks
+
+
+def credentials(text, *, python=False):
+    """Withhold values from artifacts; valid Python uses AST to avoid quoted examples."""
+    names = r'(?i)(?:\w+[_-])?(?:api[_-]?key|access[_-]?token|password|client[_-]?secret|auth[_-]?token|private[_-]?key|secret|token)'
+    if python:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, RecursionError, ValueError):
+            tree = None
+        if tree is not None:
+            values = []
+            for item in ast.walk(tree):
+                targets = []
+                if isinstance(item, (ast.Assign, ast.AnnAssign)):
+                    targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+                    targets = [t.id if isinstance(t, ast.Name) else t.attr if isinstance(t, ast.Attribute) else '' for t in targets]
+                elif isinstance(item, ast.keyword):
+                    targets = [item.arg or '']
+                if targets and isinstance(item.value, ast.Constant) and any(re.fullmatch(names, t) for t in targets):
+                    values.append((item.value.value, item.value.lineno))
+                if isinstance(item, ast.Dict):
+                    for key, value in zip(item.keys, item.values):
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str) and re.fullmatch(names, key.value) and isinstance(value, ast.Constant):
+                            values.append((value.value, value.lineno))
+            return values
+    # In malformed Python, only assignment-shaped lines are trusted as lexical candidates.
+    prefix = r'''(?im)^\s*["']?''' if python else r'(?i)\b'
+    expression = prefix + names.replace('(?i)', '') + r'''["']?\s*[:=]\s*["']([^"'\r\n]{12,})["']'''
+    return [(match.group(1), text.count('\n', 0, match.start()) + 1) for match in re.finditer(expression, text)]
 
 
 def snapshot_changes(root, files):
@@ -321,32 +352,86 @@ def check_worker(status_path, argv):
     try:
         if os.name == "nt":
             job_handle = windows_check_job()
+            executable = shutil.which(argv[0])
+            if executable:
+                argv = [executable, *argv[1:]]
+            if Path(argv[0]).suffix.lower() in {'.cmd', '.bat'}:
+                # Windows implicitly invokes cmd for batch files. Reject expansions
+                # and operators rather than letting literal argv become shell code.
+                if any(re.search(r'[&|<>^%!"\r\n]', arg) for arg in argv):
+                    raise OSError("Batch check arguments contain shell syntax; use the underlying executable with literal argv")
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, check=False)
         write_json(status_path, {"status": "passed" if result.returncode == 0 else "failed", "exit_code": result.returncode})
         return 0
     except OSError as error:
-        write_json(status_path, {"status": "error", "exit_code": None, "error": type(error).__name__})
+        write_json(status_path, {"status": "error", "exit_code": None,
+                                 "error": redact(f"{type(error).__name__}: {argv[0]}: {error}")})
         return 1
 
 
-def drain_output(stream, captured, flags):
+def drain_output(stream, captured, flags, limit=MAX_LOG_BYTES):
     try:
         while True:
             chunk = stream.read(8192)
             if not chunk:
                 break
-            remaining = MAX_LOG_BYTES - len(captured)
+            remaining = limit - len(captured)
             captured.extend(chunk[:remaining])
             flags["truncated"] |= len(chunk) > remaining
     finally:
         stream.close()
 
 
-def redact(text):
+def redaction_values():
+    values = set()
     for name, value in os.environ.items():
-        if re.search(r"(?i)token|secret|password|api_?key", name) and len(value) >= 4:
-            text = text.replace(value, "[REDACTED]")
+        if re.search(r"(?i)token|secret|password|api_?key|private_?key", name):
+            values.add(value)
+        if '://' in value:
+            try:
+                password = urlsplit(value).password
+                if password:
+                    values.update((value, password, unquote(password)))
+            except ValueError:
+                pass
+    # Globally replacing low-information flags/numbers destroys ordinary logs.
+    # Such values are still hidden when printed in a credential-shaped field.
+    return sorted((v for v in values if len(v) >= 4 and not v.isdecimal()
+                   and v.lower() not in {'true', 'false', 'none', 'null', 'undefined'}), key=len, reverse=True)
+
+
+def redact(text):
+    for value in redaction_values():
+        text = text.replace(value, "[REDACTED]")
+    text = re.sub(r'(?is)-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)', '[REDACTED PRIVATE KEY]', text)
+    text = re.sub(r'(?i)(\b[a-z][\w+.-]*://[^\s/@:]+:)[^\s/@]*(?=@|$)', r'\1[REDACTED]', text)
+    text = re.sub(r'''(?i)(\b(?:\w+[_-])?(?:password|api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*)[^\s,;]+''', r'\1[REDACTED]', text)
     return text
+
+
+def bounded_log(captured, truncated):
+    raw = bytes(captured).decode('utf-8', errors='replace')
+    text = redact(raw)
+    if truncated:
+        # Drop the lookahead AFTER redaction so a partial secret at the raw
+        # capture boundary cannot become visible when earlier redactions shrink it.
+        lookahead = max([4096, *(len(v.encode('utf-8')) for v in redaction_values())])
+        text = text[:-lookahead]
+    return text.encode('utf-8')[:MAX_LOG_BYTES].decode('utf-8', errors='ignore')
+
+
+def redact_argv(argv):
+    result, secret_next = [], False
+    for argument in argv:
+        sensitive = argument.startswith('-') and re.search(r'(?i)password|secret|token|api[-_]?key|private[-_]?key', argument.split('=', 1)[0])
+        if secret_next:
+            result.append('[REDACTED]')
+        elif sensitive and '=' in argument:
+            result.append(argument.split('=', 1)[0] + '=[REDACTED]')
+        else:
+            result.append(redact(argument))
+        secret_next = bool(sensitive and '=' not in argument)
+    return result
 
 
 def execute_checks(checks, cwd, run):
@@ -354,8 +439,8 @@ def execute_checks(checks, cwd, run):
     (run / "logs").mkdir()
     for index, check in enumerate(checks, 1):
         started = time.monotonic()
-        result = {"name": check["name"], "status": "error", "exit_code": None, "log": f"logs/check-{index}.log",
-                  "argv": [redact(argument) for argument in check["argv"]], "timeout_seconds": check.get("timeout", 60)}
+        result = {"name": redact(check["name"]), "status": "error", "exit_code": None, "log": f"logs/check-{index}.log",
+                  "argv": redact_argv(check["argv"]), "timeout_seconds": check.get("timeout", 60)}
         captured = bytearray()
         flags = {"truncated": False}
         process = None
@@ -367,7 +452,8 @@ def execute_checks(checks, cwd, run):
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        start_new_session=os.name != "nt",
                                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
-            reader = threading.Thread(target=drain_output, args=(process.stdout, captured, flags), daemon=True)
+            lookahead = max([4096, *(len(v.encode('utf-8')) for v in redaction_values())])
+            reader = threading.Thread(target=drain_output, args=(process.stdout, captured, flags, MAX_LOG_BYTES + lookahead), daemon=True)
             reader.start()
             try:
                 process.wait(timeout=check.get("timeout", 60))
@@ -391,10 +477,10 @@ def execute_checks(checks, cwd, run):
             if result["status"] == "timeout":
                 result["exit_code"] = process.returncode
         except OSError as error:
-            result["error"] = type(error).__name__
+            result["error"] = redact(f"{type(error).__name__}: {error}")
         result["duration_seconds"] = round(time.monotonic() - started, 3)
-        result["log_truncated"] = flags["truncated"]
-        (run / result["log"]).write_text(redact(bytes(captured).decode("utf-8", errors="replace")), encoding="utf-8")
+        result["log_truncated"] = flags["truncated"] or len(captured) > MAX_LOG_BYTES
+        (run / result["log"]).write_text(bounded_log(captured, flags['truncated'] or result.get('output_incomplete', False)), encoding="utf-8", newline='\n')
         results.append(result)
         # Preserve completed work if the next command fails or is interrupted.
         write_json(run / "checks.json", results)
@@ -536,10 +622,11 @@ def main(argv=None):
             result = scan(args.source, args.output, args.checks, node=args.node, js_parser_root=args.js_parser_root)
         else:
             result = collect(args.run.resolve())
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=True))
         return 0
     except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
-        print(f"HydraScan: {type(error).__name__}: operation could not complete; inspect inputs and saved run status.", file=sys.stderr)
+        message = redact(f"HydraScan: {type(error).__name__}: {error}")
+        print(message.encode('ascii', errors='backslashreplace').decode('ascii'), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("HydraScan: interrupted; completed check results are preserved.", file=sys.stderr)

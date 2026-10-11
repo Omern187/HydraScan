@@ -193,7 +193,7 @@ Use another new output directory:
 python skills/hydrascan/scripts/hydrascan.py scan ../my-app --output ../hydrascan-tests --checks checks.json
 ```
 
-Commands run one at a time in the source snapshot, without a shell. **The snapshot is not a sandbox:** processes can still access your machine and network. Run untrusted code in a contained disposable environment. [Runner details](skills/hydrascan/references/engine.md)
+Commands run one at a time in the source snapshot with explicit argument arrays. Windows batch launchers such as `npm.cmd` use Windows command processing; arguments containing shell operators or expansions are rejected. **The snapshot is not a sandbox:** processes can still access your machine and network. Run untrusted code in a contained disposable environment. [Runner details](skills/hydrascan/references/engine.md)
 
 </details>
 
@@ -232,7 +232,7 @@ Run the tooling tests from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-Revision **2026-10-10.11** passed **159 tooling tests** with Babel available. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Mixed Python/JavaScript scans are covered with automatic and explicit Node selection, including a safe response control.
+Revision **2026-10-11.1** passed **257 tooling tests** with Babel available. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Tests cover mixed Python/JavaScript scans, credential snapshots and logs, Windows execution, Flask input forms, path/template boundaries and authorization controls.
 
 Synthetic reviews found missed issues and false positives. Those cases informed fixes and regression tests; passing them again doesn't establish detection rates for other projects.
 

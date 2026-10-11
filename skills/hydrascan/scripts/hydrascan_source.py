@@ -36,8 +36,7 @@ def inspect_python(text):
             match = re.fullmatch(r'\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\((.*)\)\s*;?\s*', schema, re.I | re.S) if isinstance(schema, str) else None
             if match:
                 columns = {item.strip().split()[0].strip('"`[]').lower() for item in match[2].split(',') if item.strip()}
-                if columns & ownership:
-                    owned_tables[match[1].lower()] = columns & ownership
+                owned_tables[match[1].lower()] = columns & ownership
 
     def emit(node, rule, title, family, detail):
         key = (node.lineno, node.col_offset, rule)
@@ -67,10 +66,12 @@ def inspect_python(text):
             result = {**base, "call": binding(node, env), 'owner_access': set()}
             root = name_of(node).split('.')[0]
             external = root not in env or env[root].get('parameter') or env[root].get('request_source')
-            if (external and name_of(node) in {'self.path', 'request.path', 'request.args', 'request.GET', 'request.query_params', 'request.path_params', 'request.json'}
-                    or binding(node, env) in {'flask.request.path', 'flask.request.args', 'flask.request.json', 'flask.request.GET'}):
-                result.update(request_input=True, input_line=node.lineno)
+            source_fields = {'path', 'args', 'GET', 'POST', 'query_params', 'path_params', 'json', 'form', 'values', 'cookies', 'headers', 'files', 'data', 'body', 'view_args'}
+            if (external and name_of(node) == 'self.path' or node.attr in source_fields
+                    and (external and name_of(node).startswith('request.') or binding(node.value, env) == 'flask.request')):
+                result.update(dynamic=True, request_input=True, input_line=node.lineno)
             if (external and name_of(node) == 'request.user' or root not in env and name_of(node) in {'current_user.id', 'current_user.pk', 'current_user.tenant_id'}
+                    or binding(node, env) == 'flask.g.user'
                     or base.get('principal') and node.attr in {'id', 'pk', 'tenant_id', 'account_id'}):
                 result['principal'] = True
             else:
@@ -82,7 +83,9 @@ def inspect_python(text):
         if isinstance(node, ast.Subscript):
             base = facts(node.value, env)
             index = facts(node.slice, env)
-            result = {**base, 'call': '', 'owner_access': set(), 'direct_objects': set(), 'principal': bool(base.get('principal') and index.get('literal') in {'id', 'pk', 'tenant_id', 'account_id'})}
+            result = {**base, 'call': '', 'owner_access': set(), 'direct_objects': set(), 'principal': bool(
+                (base.get('principal') or binding(node.value, env) == 'flask.session')
+                and index.get('literal') in {'id', 'pk', 'user_id', 'tenant_id', 'account_id'})}
             if index.get('literal') in ownership and base.get('direct_objects'):
                 result['owner_access'] = {(location, index['literal']) for location in base['direct_objects']}
             return result
@@ -91,6 +94,12 @@ def inspect_python(text):
             values = [facts(value, env) for value in node.args] + [facts(value.value, env) for value in node.keywords]
             receiver = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
             flow = combine_flow(values + [receiver])
+            if target in {'urllib.parse.urlparse', 'urllib.parse.urlsplit'} and node.args:
+                return {**flow, 'dynamic': True, 'call': '', 'parsed_url': name_of(node.args[0])}
+            if target in {'int', 'builtins.int', 'werkzeug.utils.secure_filename'}:
+                return {**flow, 'dynamic': False, 'call': '', 'path_safe_segment': True}
+            if target == 'flask.session.get' and len(node.args) == 1 and not node.keywords and values[0].get('literal') in {'user_id', 'id', 'tenant_id', 'account_id'}:
+                return {'dynamic': True, 'call': '', 'principal': True}
             if isinstance(node.func, ast.Attribute) and node.func.attr == 'get' and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'Authorization':
                 flow['auth_token'] = True
             if name_of(node.func).lower().endswith(('sessions.get', 'session_users.get')) and flow.get('auth_token'):
@@ -113,8 +122,14 @@ def inspect_python(text):
                 return {"dynamic": False, "call": "", "tar": True}
             if target in {"pathlib.Path", "Path", "os.path.join"} or target.endswith((".joinpath", ".resolve", ".absolute")):
                 base = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
-                return {**base, "dynamic": any(value.get("dynamic") for value in values) or base.get("dynamic", False),
+                if target in {'pathlib.Path', 'Path'} and len(values) == 1 and values[0].get('path'):
+                    base = values[0]
+                root_value = values[0] if target == 'os.path.join' and values else base
+                return {**base, **flow, "dynamic": any(value.get("dynamic") for value in values) or base.get("dynamic", False),
                         "path": True, "normalized": target.endswith(".resolve"), "call": "",
+                        "path_root": base.get('path_root') or (ast.dump(node.args[0]) if target == 'os.path.join' and node.args else None),
+                        "root_version": base.get('root_version') if target != 'os.path.join' else root_value.get('bound_at'),
+                        "root_input": base.get('root_input', False) or (target == 'os.path.join' and root_value.get('request_input', False)),
                         "path_segment_dynamic": base.get("path_segment_dynamic", False) or any(value.get("dynamic") for value in values)}
             if target in {"requests.Session", "httpx.Client", "httpx.AsyncClient"}:
                 return {"dynamic": False, "call": target.rsplit(".", 1)[0]}
@@ -129,10 +144,11 @@ def inspect_python(text):
         if isinstance(node, ast.Compare) or isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             flow['objects'] = set()  # A boolean result is not the fetched record.
         return {**flow, "dynamic": any(child.get("dynamic") for child in children), "call": "",
-                "elements": children if isinstance(node, (ast.Tuple, ast.List)) else None,
+                "elements": children if isinstance(node, (ast.Tuple, ast.List, ast.Set)) else None,
                 "composed": isinstance(node, (ast.JoinedStr, ast.BinOp)),
                 "path": isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div),
                 "path_root": ast.dump(node.left) if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else None,
+                "root_version": path_base.get('bound_at'), "root_input": path_base.get('request_input', False),
                 "path_segment_dynamic": path_base.get('path_segment_dynamic', False) or facts(node.right, env).get("dynamic") if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else False}
 
     def combine_flow(values):
@@ -168,6 +184,8 @@ def inspect_python(text):
         if position >= len(params) or not params[position].get('request_input'):
             return None
         fields = owned_tables.get(match[1].lower(), ownership)
+        if not fields:
+            return None  # Publication policy is reviewed by the project analyzer.
         scoped = False
         # Accept only a flat conjunction with a bound principal; OR and nested
         # predicate expressions require review rather than a guessed guarantee.
@@ -182,6 +200,9 @@ def inspect_python(text):
                 'input_line': params[position].get('input_line')}
 
     def object_guard(test, env, operator):
+        if isinstance(test, ast.BoolOp) and (isinstance(operator(), ast.NotEq) and isinstance(test.op, ast.Or)
+                                             or isinstance(operator(), ast.Eq) and isinstance(test.op, ast.And)):
+            return set().union(*(object_guard(part, env, operator) for part in test.values))
         if not isinstance(test, ast.Compare) or len(test.ops) != 1 or not isinstance(test.ops[0], operator):
             return set()
         left, right = facts(test.left, env), facts(test.comparators[0], env)
@@ -209,7 +230,8 @@ def inspect_python(text):
     def terminates(statements, env):
         return any(isinstance(item, (ast.Return, ast.Raise)) or isinstance(item, ast.Expr) and isinstance(item.value, ast.Call)
                    and binding(item.value.func, env) == 'flask.abort' and item.value.args
-                   and isinstance(item.value.args[0], ast.Constant) and item.value.args[0].value in {401, 403, 404}
+                   and isinstance(item.value.args[0], ast.Constant) and isinstance(item.value.args[0].value, int)
+                   and 400 <= item.value.args[0].value <= 599
                    for item in statements)
 
     def parameters(arguments):
@@ -312,6 +334,11 @@ def inspect_python(text):
                     emit(node, "python-yaml-loader", "YAML loader needs configuration review", PARSER, "Resolve the selected loader and callers; a loader's local name is insufficient.")
             elif target == "ssl._create_unverified_context" or (target.startswith(("requests.", "httpx.")) and literal("verify", False)):
                 emit(node, "python-tls-verification", "TLS peer verification disabled", TRANSPORT, "Identify affected transport and protected data.")
+            if target in {'flask.render_template_string', 'jinja2.Template', 'jinja2.Environment.from_string'} or target.endswith('.from_string') and target.startswith('jinja2.'):
+                template = node.args[0] if node.args else keywords.get('source', keywords.get('template'))
+                if template is not None and facts(template, env).get('dynamic'):
+                    emit(node, 'python-template-input', 'Variable template source reaches a template interpreter', INPUT,
+                         'Distinguish template source from escaped rendering data; establish reachable input and template capabilities.')
 
             query_node = node.args[0] if node.args else next((keywords[key] for key in ('query', 'sql', 'statement') if key in keywords), None)
             if target.endswith((".execute", ".executemany", ".executescript", ".raw")) and query_node is not None:
@@ -329,25 +356,34 @@ def inspect_python(text):
                 selected = facts(keywords.get("filter"), env) if keywords.get("filter") else {}
                 if receiver.get("tar") and selected.get("literal") != "data":
                     emit(node, "python-archive-extraction", "Archive extraction needs path/link containment review", FILES, "The locally recognized TAR receiver lacks an explicit data filter; inspect runtime defaults and all output/link boundaries.")
-            if isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes", "open", "write_text", "write_bytes"}:
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes", "open", "write_text", "write_bytes", "unlink", "rmdir"}:
                 receiver = facts(node.func.value, env)
-                checked = (name_of(node.func.value), receiver.get("path_root")) in guarded and receiver.get("normalized")
+                checked = (name_of(node.func.value), receiver.get("path_root"), receiver.get('root_version')) in guarded and receiver.get("normalized") and not receiver.get('root_input')
                 if receiver.get("path") and receiver.get("path_segment_dynamic") and not checked:
                     emit(node, "python-path-input", "Composed input reaches a file operation", FILES, "Check canonical path containment, caller-controlled bases, links and overwrite permissions; source triage is not a filesystem sandbox.")
-            if target in {"open", "builtins.open"} and node.args:
-                path = facts(node.args[0], env)
-                checked = (name_of(node.args[0]), path.get("path_root")) in guarded and path.get("normalized")
-                if path.get("path") and path.get("path_segment_dynamic") and not checked:
+            file_calls = {'open', 'builtins.open', 'os.remove', 'os.unlink', 'os.rmdir', 'os.rename', 'os.replace',
+                          'shutil.copy', 'shutil.copyfile', 'shutil.move', 'shutil.rmtree', 'flask.send_file'}
+            upload_save = isinstance(node.func, ast.Attribute) and node.func.attr == 'save' and facts(node.func.value, env).get('request_input')
+            if target in file_calls or upload_save:
+                paths = list(node.args[:2] if target in {'os.rename', 'os.replace', 'shutil.copy', 'shutil.copyfile', 'shutil.move'} else node.args[:1])
+                if not paths:
+                    paths = [keywords[key] for key in ('file', 'filename', 'path', 'path_or_file', 'dst') if key in keywords]
+                for argument in paths:
+                    path = facts(argument, env)
+                    checked = (name_of(argument), path.get('path_root'), path.get('root_version')) in guarded and path.get('normalized') and not path.get('root_input')
+                    if not path.get('dynamic') or checked:
+                        continue
                     emit(node, "python-path-input", "Composed input reaches a file operation", FILES, "Verify canonical containment and the exact allowed root before the operation.")
-            if target.startswith(("requests.", "httpx.", "urllib.request.")) and target.endswith((".get", ".post", ".request", ".urlopen")):
+            if target.startswith(("requests.", "httpx.", "urllib.request.", "aiohttp.")) and target.endswith((".get", ".post", ".put", ".patch", ".delete", ".head", ".options", ".request", ".urlopen")):
                 position = 1 if target.endswith('.request') else 0
                 url = node.args[position] if len(node.args) > position else keywords.get("url")
-                if url is not None and facts(url, env).get("dynamic"):
+                checked = url is not None and (name_of(url), 'allowed-url') in guarded and literal('allow_redirects', False)
+                if url is not None and facts(url, env).get("dynamic") and not checked:
                     emit(node, "python-outbound-input", "Variable URL reaches an outbound client", SSRF, "Inspect allowed hosts, resolved addresses and redirects on this exact call; variable URLs can be legitimate.")
 
     def bind(target, value, env):
         if isinstance(target, ast.Name):
-            env[target.id] = value
+            env[target.id] = {**value, 'bound_at': (target.lineno, target.col_offset)}
         elif isinstance(target, (ast.Tuple, ast.List)):
             elements = value.get('elements') or []
             for index, element in enumerate(target.elts):
@@ -367,7 +403,7 @@ def inspect_python(text):
             value['principal'] = all(item.get('principal') for item in values)
             value['direct_objects'] = set.intersection(*(set(item.get('direct_objects', set())) for item in values))
             value['normalized'] = all(item.get('normalized') for item in values)
-            for key in ('literal', 'path_root'):
+            for key in ('literal', 'path_root', 'root_version', 'bound_at', 'root_input', 'parsed_url', 'elements'):
                 if all(key in item and item[key] == values[0].get(key) for item in values):
                     value[key] = values[0][key]
             calls = [item.get('call', '') for item in values]
@@ -395,6 +431,10 @@ def inspect_python(text):
                     local[name] = {'dynamic': True, 'call': ''}
                 for argument in parameters(statement.args):
                     local[argument.arg] = {"dynamic": True, "call": "", 'parameter': True}
+                    if any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in {'route', 'get', 'post', 'put', 'patch', 'delete'}
+                           and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)
+                           and f'<int:{argument.arg}>' in d.args[0].value for d in statement.decorator_list):
+                        local[argument.arg].update(dynamic=False, request_input=True, input_line=argument.lineno)
                 # Include schema-independent authentication context, never infer an authorization defect.
                 auth = any(isinstance(item, ast.Constant) and item.value == 'Authorization'
                            or isinstance(item, ast.Attribute) and name_of(item) in {'request.user', 'request.session'}
@@ -416,13 +456,13 @@ def inspect_python(text):
                     for target in statement.targets if isinstance(statement, ast.Assign) else [statement.target]:
                         check_calls(target, env, guarded, authenticated)
                         bind(target, value, env)
-                        guarded = {item for item in guarded if item[0] != name_of(target)}
+                        guarded = {item for item in guarded if item[0] != name_of(target) and item[1] != ast.dump(target)}
             elif isinstance(statement, ast.AugAssign):
                 check_calls(statement.target, env, guarded, authenticated)
                 check_calls(statement.value, env, guarded, authenticated)
                 old, value = facts(statement.target, env), facts(statement.value, env)
                 bind(statement.target, {**combine_flow([old, value]), "dynamic": old.get('dynamic') or value.get('dynamic'), 'composed': True, 'call': ''}, env)
-                guarded = {item for item in guarded if item[0] != name_of(statement.target)}
+                guarded = {item for item in guarded if item[0] != name_of(statement.target) and item[1] != ast.dump(statement.target)}
             elif isinstance(statement, (ast.With, ast.AsyncWith)):
                 local = env
                 for item in statement.items:
@@ -438,12 +478,38 @@ def inspect_python(text):
                 merge(env, [left, right])
                 if terminates(statement.body, env):
                     guarded |= object_guard(statement.test, env, ast.NotEq)
+                    test = statement.test
+                    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and isinstance(test.operand, ast.Call)
+                            and isinstance(test.operand.func, ast.Attribute) and test.operand.func.attr == 'is_relative_to'
+                            and len(test.operand.args) == 1 and not test.operand.keywords):
+                        root = facts(test.operand.args[0], env)
+                        if not root.get('request_input'):
+                            guarded.add((name_of(test.operand.func.value), ast.dump(test.operand.args[0]), root.get('bound_at')))
+                    # Only a terminating rejection of BOTH scheme and fixed host,
+                    # followed by redirects disabled, closes this exact URL call.
+                    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+                        schemes, hosts = set(), set()
+                        for part in test.values:
+                            if not isinstance(part, ast.Compare) or len(part.ops) != 1 or not isinstance(part.left, ast.Attribute):
+                                continue
+                            parsed = facts(part.left.value, env).get('parsed_url')
+                            if not parsed:
+                                continue
+                            choice = facts(part.comparators[0], env)
+                            if part.left.attr == 'scheme' and isinstance(part.ops[0], ast.NotEq) and choice.get('literal') == 'https':
+                                schemes.add(parsed)
+                            allowed = choice.get('elements') or []
+                            if part.left.attr == 'hostname' and isinstance(part.ops[0], ast.NotIn) and allowed and all(isinstance(v.get('literal'), str) and v['literal'] for v in allowed):
+                                hosts.add(parsed)
+                        guarded |= {(name, 'allowed-url') for name in schemes & hosts}
                 # A narrow guard suppresses only a normalized path checked in this local block.
                 test = statement.test
                 if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.NotIn)
                         and isinstance(test.comparators[0], ast.Attribute) and test.comparators[0].attr == 'parents'
                         and any(isinstance(item, (ast.Return, ast.Raise)) for item in statement.body)):
-                    guarded.add((name_of(test.comparators[0].value), ast.dump(test.left)))
+                    root = facts(test.left, env)
+                    if not root.get('request_input'):
+                        guarded.add((name_of(test.comparators[0].value), ast.dump(test.left), root.get('bound_at')))
             elif isinstance(statement, ast.Try):
                 local = dict(env)
                 body(statement.body, local, guarded, authenticated)

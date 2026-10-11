@@ -54,9 +54,10 @@ class State:
     guards: dict = field(default_factory=dict)
     admin: bool = False
     non_admin: bool = False
+    decorator_policy_unknown: bool = False
 
     def copy(self):
-        return State(dict(self.env), dict(self.guards), self.admin, self.non_admin)
+        return State(dict(self.env), dict(self.guards), self.admin, self.non_admin, self.decorator_policy_unknown)
 
 
 class Project:
@@ -158,7 +159,7 @@ class Project:
         self.seen.add(key)
         trace = [{"path": p, "line": l, "column": c} for p, l, c in (value.trace if value else ())]
         item = dict(path=path, line=getattr(node, "lineno", None), column=getattr(node, "col_offset", -1) + 1 if node else None,
-                    rule=rule, title=title, family=AUTH if "authorization" in rule or "boundary" in rule else SQL if "sql" in rule else INPUT,
+                    rule=rule, title=title, family='Source analysis coverage' if collection is self.gaps else AUTH if "authorization" in rule or "boundary" in rule or 'object-policy' in rule else SQL if "sql" in rule else INPUT,
                     method="Bounded Python project AST flow", detail=detail, trace=trace,
                     evidence={"operation": dict(zip(("path", "line", "column"), self.loc(path, node)))}, **extra)
         if collection is self.signals:
@@ -192,6 +193,10 @@ class Project:
             safe = bool(fields) and fields <= checked
             self.observe_control(row['path'], row['node'], 'python-object-authorization', safe)
             if safe:
+                continue
+            if not fields and row['schema_verified'] or state.decorator_policy_unknown:
+                self.issue(self.tasks, path, node, 'python-project-object-policy', 'Verify object access policy and supplied decorators',
+                           'A request-selected object reaches this boundary. Its declared schema has no ownership fields, or a supplied decorator has unresolved policy. Inspect publication, roles and decorator effects before judging authorization.', value)
                 continue
             detail = f"Request-selected {row['kind']} object reaches {action}; "
             detail += "declared ownership/tenant fields lack a dominating exact identity check." if fields else "ownership, tenant and publication policy are unknown."
@@ -252,7 +257,7 @@ class Project:
         result = Value()
         for alias, identity in requested.items():
             fields = schema.get(tables[alias].lower(), set())
-            row = self.record(path, node, identity, fields, scoped.get(alias, ()), "SQL", bool(fields))
+            row = self.record(path, node, identity, fields, scoped.get(alias, ()), "SQL", tables[alias].lower() in schema)
             result = combine([result, row])
         if operation != "SELECT":
             self.boundary(path, node, result, state, operation.lower())
@@ -315,6 +320,8 @@ class Project:
                 return Value(origins=frozenset({location}), trace=(location,))
             if symbol in {"request.user", "flask.request.user", "flask_login.current_user", "current_user"}:
                 return Value(principal="object", symbol=symbol)
+            if symbol == 'flask.g.user':
+                return Value(principal='object', symbol=symbol)
             if base.principal == "object" and node.attr in {"id", "pk", "tenant_id", "account_id", "is_admin", "is_superuser"}:
                 return Value(principal="id" if node.attr == "pk" else node.attr, symbol=symbol)
             if symbol in {"current_user.id", "current_user.pk", "current_user.tenant_id", "current_user.account_id", "current_user.is_admin", "current_user.is_superuser"}:
@@ -339,6 +346,9 @@ class Project:
             return replace(base, symbol=symbol, principal="", member="")
         if isinstance(node, ast.Subscript):
             base, index = self.expr(node.value, state, path), self.expr(node.slice, state, path)
+            principal_fields = {'id': 'id', 'pk': 'id', 'user_id': 'id', 'tenant_id': 'tenant_id', 'account_id': 'account_id'}
+            if (base.principal == 'object' or base.symbol == 'flask.session') and index.literal in principal_fields:
+                return Value(principal=principal_fields[index.literal])
             if base.mapping:
                 return dict(base.mapping).get(index.literal, combine([base, index]))
             if base.rows and index.literal in OWNER:
@@ -368,6 +378,10 @@ class Project:
             if target in self.functions:
                 return self.call(target, args, keywords, state, path, node)
             name = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+            if receiver.symbol == 'flask.session' and name == 'get' and len(args) == 1 and not keywords:
+                field = args[0][1].literal
+                if field in {'user_id', 'id', 'tenant_id', 'account_id'}:
+                    return Value(principal='id' if field == 'user_id' else field)
             if receiver.rows and name == 'get' and len(args) == 1 and not keywords and args[0][1].literal in OWNER:
                 for key in receiver.rows:
                     self.rows[key]['fields'].add(args[0][1].literal)
@@ -499,6 +513,40 @@ class Project:
             state.non_admin = True
             state.admin = False
 
+    def has_decorator_admin_check(self, key):
+        """A visible role denial changes the policy question, never proves object access."""
+        module, _path, function = self.functions[key]
+        if len(function.body) != 2 or not isinstance(function.body[0], ast.FunctionDef) or len(function.args.args) != 1 or function.args.posonlyargs or function.args.kwonlyargs:
+            return False
+        wrapper, returned = function.body
+        parameter = function.args.args[0].arg
+        if (not isinstance(returned, ast.Return) or not isinstance(returned.value, ast.Name) or returned.value.id != wrapper.name
+                or len(wrapper.body) != 2 or not isinstance(wrapper.body[1], ast.Return)
+                or not isinstance(wrapper.body[1].value, ast.Call) or dotted(wrapper.body[1].value.func) != parameter):
+            return False
+        state = State(dict(self.globals[module]))
+        # Shadowed names and unknown wrappers cannot establish a trusted role source.
+        for p in function.args.args + wrapper.args.posonlyargs + wrapper.args.args + wrapper.args.kwonlyargs + [a for a in (wrapper.args.vararg, wrapper.args.kwarg) if a]:
+            state.env[p.arg] = Value()
+        if any(self.symbol(d.func if isinstance(d, ast.Call) else d, state) != 'functools.wraps' for d in wrapper.decorator_list):
+            return False
+        for node in wrapper.body[:1]:
+            if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare) or len(node.test.ops) != 1 or not isinstance(node.test.ops[0], ast.NotEq):
+                continue
+            test = node.test
+            if not isinstance(test.comparators[0], ast.Constant) or test.comparators[0].value != 'admin':
+                continue
+            role = test.left
+            trusted = (isinstance(role, ast.Call) and self.symbol(role.func, state) == 'flask.session.get'
+                       and len(role.args) == 1 and not role.keywords and isinstance(role.args[0], ast.Constant) and role.args[0].value == 'role')
+            trusted |= (isinstance(role, ast.Subscript) and self.symbol(role.value, state) == 'flask.session'
+                        and isinstance(role.slice, ast.Constant) and role.slice.value == 'role')
+            denied = any(isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and self.symbol(s.value.func, state) == 'flask.abort'
+                         and s.value.args and isinstance(s.value.args[0], ast.Constant) and s.value.args[0].value in {401, 403, 404} for s in node.body)
+            if trusted and denied:
+                return True
+        return False
+
     def block(self, statements, states, path, route=False):
         returns = []
         for node in statements:
@@ -607,7 +655,7 @@ class Project:
             env[definition.args.kwarg.arg] = replace(combine(v for _, v in extra), mapping=extra)
         call_location = self.loc(caller_path, node)
         env = {k: replace(v, trace=v.trace + (call_location,)) if v.origins or v.rows else v for k, v in env.items()}
-        state = State(env, dict(caller.guards), caller.admin, caller.non_admin)
+        state = State(env, dict(caller.guards), caller.admin, caller.non_admin, caller.decorator_policy_unknown)
         self.stack.append((module, target, call_location))
         live, returns = self.block(definition.body, [state], path)
         self.stack.pop()
@@ -675,6 +723,10 @@ class Project:
                     location = self.loc(path, p)
                     env[p.arg] = Value(origins=frozenset({location}), trace=(location,))
             state = State(env)
+            resolved = [self.symbol(d.func if isinstance(d, ast.Call) else d, state) for d in node.decorator_list
+                        if not (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                                and d.func.attr in {'route', 'get', 'post', 'put', 'patch', 'delete'})]
+            state.decorator_policy_unknown = any(d in self.functions and self.has_decorator_admin_check(d) for d in resolved)
             self.expanded_functions.add(key)
             self.stack.append((module, key, self.loc(path, node)))
             live, returns = self.block(node.body, [state], path, route=True)
