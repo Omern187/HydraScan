@@ -8,6 +8,11 @@ const METHOD = 'JavaScript Babel AST and bounded local/module call flow';
 const INPUT = 'Command, code, and template injection';
 const CONTENT = 'XSS and content injection';
 const SSRF = 'SSRF and outbound trust';
+const FILES = 'Files, paths and archives';
+const QUERY = 'SQL and data query injection';
+const TRANSPORT = 'Cryptography and transport';
+const ACCESS = 'Authentication and recovery';
+const PROTOCOL = 'Protocol and header handling';
 const MAX_INPUT = 36_000_000;
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const pos = (node) => ({line: node?.loc?.start.line || 1, column: (node?.loc?.start.column || 0) + 1});
@@ -19,6 +24,7 @@ const nameOf = node => !node ? '' : node.type === 'Identifier' ? node.name :
 const fixed = value => ({dynamic: false, literal: value, trace: [], clean: []});
 const unknown = (trace = []) => ({dynamic: true, trace, clean: []});
 const merge = values => ({dynamic: values.some(v => v.dynamic),
+  scalar: values.length>0 && values.every(v => v.scalar || !v.dynamic && own(v,'literal') && (v.literal===null || typeof v.literal!=='object')),
   trace: values.flatMap(v => v.trace || []).slice(-24), clean: values.length ? (values[0].clean || []).filter(c => values.every(v => (v.clean || []).includes(c))) : []});
 const functionTypes = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression', 'ObjectMethod', 'ClassMethod']);
 
@@ -75,6 +81,47 @@ function indexAt(text,line,column) {
     index+=text.slice(index,index+2)==='\r\n'?2:1;
   }
   return index+column-1;
+}
+
+function stableBindings(ast) {
+  // ponytail: whole-file name identity is conservative across scopes; no alias proof.
+  const parents=new WeakMap(), bindings=new Map(), rejected=new Set();
+  let nativeMap=true,nativeURL=true;
+  walk(ast,node=>{
+    for(const child of kids(node)) parents.set(child,node);
+    if(node.type!=='VariableDeclarator' || node.id.type!=='Identifier') return;
+    const init=node.init;
+    if(init?.type!=='NewExpression' || !['Map','URL'].includes(nameOf(init.callee))) return;
+    let values=null;
+    if(nameOf(init.callee)==='Map') {
+      const entries=init.arguments.length===1 && init.arguments[0].type==='ArrayExpression' && init.arguments[0].elements;
+      if(!entries?.length || entries.length>64 || !entries.every(entry=>entry?.type==='ArrayExpression' && entry.elements.length===2 && entry.elements.every(value=>value?.type==='StringLiteral'))) return;
+      values=entries.map(entry=>entry.elements[1].value);
+    }
+    if(bindings.has(node.id.name)) rejected.add(node.id.name);
+    bindings.set(node.id.name,{node,kind:nameOf(init.callee),values});
+  });
+  walk(ast,node=>{
+    if(node.type!=='Identifier') return;
+    const parent=parents.get(node), grandparent=parents.get(parent);
+    if(['Map','URL'].includes(node.name) && !(parent?.type==='NewExpression' && parent.callee===node)) {
+      if(node.name==='Map') nativeMap=false; else nativeURL=false;
+    }
+    const binding=bindings.get(node.name);
+    if(!binding || binding.node.id===node) return;
+    const member=['MemberExpression','OptionalMemberExpression'].includes(parent?.type) && parent.object===node;
+    const key=member && (parent.computed ? parent.property.value : parent.property.name);
+    if(binding.kind==='Map') {
+      if(!member || !['get','has'].includes(key) || !['CallExpression','OptionalCallExpression'].includes(grandparent?.type) || grandparent.callee!==parent) rejected.add(node.name);
+    } else if(!member || !['href','origin','pathname','hostname','host','protocol','port','search','hash'].includes(key) ||
+        grandparent?.type==='AssignmentExpression' && grandparent.left===parent || ['UpdateExpression','UnaryExpression'].includes(grandparent?.type)) rejected.add(node.name);
+  });
+  const maps=new Map(),urls=new Set();
+  for(const [name,binding] of bindings) if(!rejected.has(name)) {
+    if(binding.kind==='Map' && nativeMap) maps.set(binding.node.init.start,binding.values);
+    if(binding.kind==='URL' && nativeURL) urls.add(binding.node.init.start);
+  }
+  return {maps,urls};
 }
 
 function analyze(parser, input) {
@@ -161,6 +208,7 @@ function analyze(parser, input) {
         if(node.type==='AssignmentExpression' && nameOf(node.left)==='process.execPath') file.execPathMutation=true;
       });
       modules.set(file.path, file); parsed_paths.push(rawPath);
+      file.stable=stableBindings(file.ast);
       for (const original of file.ast.program.body) {
         const node = original.declaration || original;
         if (node.type === 'FunctionDeclaration' && node.id) file.functions.set(node.id.name, node);
@@ -196,6 +244,26 @@ function analyze(parser, input) {
       bind(pattern.elements[i],fact.elements?.[i] || fact,env,file);
   }
   function trace(file, node, kind, detail) {return {path: file.path, ...pos(node), kind, detail};}
+  const requestDerived = fact => fact?.trace?.some(entry => entry.kind === 'source' &&
+    /(?:req|request)\.(?:query|params|body|headers|cookies)|(?:window\.)?location|document\.cookie/.test(entry.detail));
+  const operatorInput = fact => fact?.dynamic && !fact.scalar && (fact.props ?
+    [...fact.props.values()].some(operatorInput) || fact.unknownProperties : true);
+  function relativeQuery(fact) {
+    const parts=fact.urlParts;
+    if(!parts?.some(part=>part.dynamic)) return false;
+    let prefix='';
+    for(const part of parts) {if(part.dynamic) break; if(typeof part.literal!=='string') return false; prefix+=part.literal;}
+    return /^\/(?![/\\])[^\\\x00-\x20]*[?#]/.test(prefix) && parts.every(part=>!part.dynamic || part.urlEncoded);
+  }
+  function redirect(file,node,target,env,title,detail) {
+    const origin=[...env].some(([key,policy])=>key.startsWith('$guard:') && policy.literalHTTPOrigin &&
+      target.urlHref && target.stableURL && env.get(key.slice(7))?.urlKey===target.urlKey);
+    const finite=target.finiteChoices?.every(value=>/^(?:\/(?![/\\])|https?:\/\/)[^\\\x00-\x20]*$/i.test(value));
+    if(target.dynamic && (origin || finite)) tasks.push(item(file,node,'js-redirect-control-review','Review redirect destination control',PROTOCOL,
+      origin ? 'An exact literal HTTP(S) origin rejection precedes use of the same stable URL href. Verify intended destinations, middleware and runtime URL behavior; this partial control is not a safety proof.' :
+      'A request key selects among a finite literal destination map with no observed mutation or escape. Verify intended destinations and runtime policy; this partial control is not a safety proof.',target.trace));
+    else evidence(file,node,'js-open-redirect',title,PROTOCOL,target,detail);
+  }
   function get(node, env, file, stack) {
     if (!node) return fixed(undefined); step(file, node);
     if (['TSAsExpression','TSTypeAssertion','TSNonNullExpression','TSSatisfiesExpression','ParenthesizedExpression','AwaitExpression','YieldExpression','ChainExpression'].includes(node.type)) return get(node.expression || node.argument, env, file, stack);
@@ -203,7 +271,19 @@ function analyze(parser, input) {
       return {...fixed(node.value), ...(node.type === 'StringLiteral' ? {literalOrigin:{file,node}} : {})};
     if (node.type === 'Identifier') return env.get(node.name) || { ...unknown([trace(file,node,'unresolved',`Unresolved value ${node.name}`)]), call: node.name};
     if (functionTypes.has(node.type)) return functionRef(file, node, node.id?.name || '<callback>');
-    if (node.type === 'TemplateLiteral') return merge(node.expressions.map(n=>get(n,env,file,stack)));
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const a=get(node.left,env,file,stack), b=get(node.right,env,file,stack);
+      const fact=merge([a,b]), parts=[...(a.urlParts || [a]),...(b.urlParts || [b])];
+      if(parts.length>64) gap(file,node,'js-url-composition-bound','URL composition exceeded the bounded part summary; dynamic URL candidates remain eligible.');
+      return {...fact, scalar:true, ...(parts.length<=64 ? {urlParts:parts} : {})};
+    }
+    if (node.type === 'TemplateLiteral') {
+      const expressions=node.expressions.map(n=>get(n,env,file,stack)), parts=[];
+      if(node.quasis.length+expressions.length<=64)
+        node.quasis.forEach((quasi,index)=>{parts.push(fixed(quasi.value.cooked)); if(expressions[index]) parts.push(expressions[index]);});
+      else gap(file,node,'js-url-composition-bound','URL template exceeded the bounded part summary; dynamic URL candidates remain eligible.');
+      return {...merge(expressions), scalar:true, ...(parts.length ? {urlParts:parts} : {})};
+    }
     if (node.type === 'ConditionalExpression') {
       get(node.test,env,file,stack);
       const a=get(node.consequent,env,file,stack),b=get(node.alternate,env,file,stack);
@@ -231,13 +311,17 @@ function analyze(parser, input) {
     if (['MemberExpression','OptionalMemberExpression'].includes(node.type)) {
       const base = get(node.object,env,file,stack), key = node.computed ? get(node.property,env,file,stack).literal : node.property.name;
       if (base.props?.has(key)) return base.props.get(key);
+      if(base.jwtDecoded && ['sub','admin','role','roles','userId','user_id','permissions'].includes(key))
+        evidence(file,node,'js-jwt-unverified','Decoded JWT claims used for identity or privilege',ACCESS,base,
+          'A request-derived token was decoded without verification in this bounded flow, then identity or privilege claims were read. Check prior verification middleware and how these claims are used; claim access alone does not prove an authentication bypass.');
       if (base.module) {const local=base.module.exports.get(key); if (local && base.module.functions.has(local)) return functionRef(base.module,base.module.functions.get(local),local);}
       const call = base.call ? base.call + '.' + (key || '?') : '';
       const raw = nameOf(node);
       if(raw==='process.execPath' && !env.has('process') && !file.execPathMutation) return fixed('Node runtime executable');
       if (/^(?:req|request)\.(?:query|params|body|headers|cookies)(?:\.|$)|^(?:window\.)?location(?:\.|$)|^document\.cookie$|^process\.argv/.test(raw))
-        return {...unknown([trace(file,node,'source',`Request/runtime input ${raw}`)]), call};
+        return {...unknown([trace(file,node,'source',`Request/runtime input ${raw}`)]), call, receiverFact:base};
       return {...base, call, receiverFact:base,
+        urlHref:base.url && key==='href',
         searchParams:base.searchParams || (base.url && key === 'searchParams')};
     }
     if (node.type === 'AssignmentExpression') {
@@ -247,8 +331,16 @@ function analyze(parser, input) {
       const value = get(node.right,env,file,stack);
       if (['MemberExpression','OptionalMemberExpression'].includes(node.left.type)) {
         const key=node.left.computed ? get(node.left.property,env,file,stack).literal : node.left.property.name;
+        const target=nameOf(node.left), base=get(node.left.object,env,file,stack);
+        if(target==='process.env.NODE_TLS_REJECT_UNAUTHORIZED' && !env.has('process') && ['0',0].includes(value.literal))
+          evidence(file,node,'js-tls-verification','TLS peer verification disabled',TRANSPORT,unknown([trace(file,node,'configuration','Explicit process TLS verification override')]),
+            'The Node TLS verification environment setting is explicitly disabled. Verify process timing and connection reachability.');
+        if(/^(?:window\.|globalThis\.|document\.)?location\.(?:href|search|hash)$/.test(target) && key==='href')
+          redirect(file,node,value,env,'Variable browser navigation target','Input reaches browser navigation. Verify protocol and destination policy; no safe destination is inferred from URL encoding.');
+        else if(key==='href' && base.domElement) evidence(file,node,'js-url-content','Variable link URL',CONTENT,value,
+          'Dynamic href values need protocol and destination validation; HTML escaping or URL encoding alone does not establish a safe URL. Verify the receiver is a navigable link.');
         if (['innerHTML','outerHTML','srcdoc'].includes(key)) evidence(file,node,'html-rendering','HTML rendering sink',CONTENT,value,'Dynamic content reaches an HTML parsing property.');
-        const base=get(node.left.object,env,file,stack); if (base.props) base.props.set(key,value);
+        if (base.props) base.props.set(key,value);
       } else bind(node.left,value,env,file);
       return value;
     }
@@ -257,6 +349,15 @@ function analyze(parser, input) {
       let args = node.arguments.map(n=>get(n.type==='SpreadElement'?n.argument:n,env,file,stack));
       let call = callee.call || (node.callee.type === 'Identifier' && env.has(node.callee.name) ? '' : nameOf(node.callee));
       if (callee.boundCall) {call=callee.boundCall.call; args=[...callee.boundCall.args,...args];}
+      if(node.type==='NewExpression' && call==='Map' && file.stable.maps.has(node.start))
+        return {...fixed(undefined), finiteMap:file.stable.maps.get(node.start)};
+      if(node.type==='NewExpression' && call==='Map' && !env.has('Map')) {
+        gap(file,node,'js-map-state-gap','Map contents are not a stable finite literal binding; mutations, aliases or escapes leave lookup values unresolved, including fixed-key lookups.');
+        return unknown([...args.flatMap(arg=>arg.trace),trace(file,node,'unresolved','Mutable Map contents are unresolved')].slice(-24));
+      }
+      if(callee.receiverFact?.finiteMap && /\.get$/.test(call || nameOf(node.callee)))
+        return {...merge(args), finiteChoices:callee.receiverFact.finiteMap,
+          trace:[...args.flatMap(arg=>arg.trace),trace(file,node,'control','Finite literal Map lookup; no observed mutation or escape')]};
       if (call === 'require' && !env.has('require') && args.length === 1 && typeof args[0].literal === 'string')
         return imported(file,args[0].literal,'*');
       if (callee.fn) return invoke(callee.fn,args,stack,node,file);
@@ -303,12 +404,44 @@ function analyze(parser, input) {
         }
         return target;
       }
-      if (args.some(value=>value.props?.get('rejectUnauthorized')?.literal === false)) {
+      if (/^(?:https|tls|axios|request|undici)(?:\.|$)/.test(call) && args.some(value=>value.props?.get('rejectUnauthorized')?.literal === false)) {
         const tlsKey = `${file.path}:${node.start}:js-tls-verification`;
         if (!seen.has(tlsKey)) {
           seen.add(tlsKey);
-          signals.push(item(file,node,'js-tls-verification','TLS peer verification disabled','Cryptography and transport','Explicit rejectUnauthorized:false options were observed. Verify the runtime client and connection reachability.'));
+          signals.push(item(file,node,'js-tls-verification','TLS peer verification disabled',TRANSPORT,'Explicit rejectUnauthorized:false options were observed on a recognized transport API. Static candidate; verify the runtime client, option semantics and connection reachability.'));
         }
+      }
+      if (/^fs(?:\.promises)?\.(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|open|openSync|readdir|readdirSync|stat|statSync|access|accessSync|realpath|realpathSync)$/.test(call) ||
+          /^(?:fs\/promises)\.(?:readFile|writeFile|appendFile|unlink|rm|rmdir|open|readdir|stat|access|realpath)$/.test(call) ||
+          /\.(?:sendFile|download)$/.test(call) && (callee.receiverFact?.responseKey || /^(?:res|response|reply)\./.test(call))) {
+        const target=args[0] || fixed('');
+        if(target.dynamic && target.trace.some(entry=>entry.kind==='source' && /process\.argv/.test(entry.detail)) &&
+            !target.trace.some(entry=>entry.kind==='parameter' || entry.kind==='source' && !/process\.argv/.test(entry.detail)))
+          tasks.push(item(file,node,'js-path-runtime-review','Review command-line filesystem path',FILES,
+            'A path comes from process.argv without a remote request source in this bounded flow. Verify the CLI caller and authorized roots; local command-line input alone does not establish a remote path vulnerability.',target.trace));
+        else if(target.dynamic && target.finiteChoices) tasks.push(item(file,node,'js-path-control-review','Review finite path selection',FILES,
+          'A request key selects among a finite literal path map with no observed mutation or escape. Verify authorized files, symbolic links and runtime policy; this partial control is not a safety proof.',target.trace));
+        else if(target.dynamic && target.basenameRooted) tasks.push(item(file,node,'js-path-control-review','Review basename path restriction',FILES,
+          'A known path.basename result was joined beneath a literal root. Verify dot names, platform separators, symbolic links and effective containment; this is a partial control, not a safety proof.',target.trace));
+        else evidence(file,node,'js-path-input','Variable filesystem path',FILES,target,'Dynamic data reaches a filesystem path. Verify authorized roots, canonical containment, symbolic links and platform path semantics.');
+      }
+      const responseReceiver=callee.receiverFact?.responseKey || /^(?:res|response|reply)\./.test(call);
+      if (/\.redirect$/.test(call) && responseReceiver)
+        redirect(file,node,args[0]?.literal !== undefined && typeof args[0].literal==='number' ? args[1] || fixed('') : args[0] || fixed(''),env,'Variable HTTP redirect target',
+          'Input reaches an HTTP redirect destination. Verify destination allowlists and protocol-relative URL handling.');
+      if (/^(?:(?:window|globalThis|document)\.)?location\.(?:assign|replace)$/.test(call))
+        redirect(file,node,args[0] || fixed(''),env,'Variable browser navigation target', 'Input reaches browser navigation. Verify protocol and destination policy.');
+      if (/\.(?:find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|countDocuments)$/.test(call) &&
+          (callee.receiverFact?.mongo || /^(?:mongoose|mongodb)\./.test(call)) && operatorInput(args[0]))
+        evidence(file,node,'js-nosql-input','Operator-capable input reaches a document query',QUERY,args[0],
+          'A Mongo-style filter includes dynamic values whose scalar types are unresolved. If objects are accepted, query operators may change filter semantics. Verify schema coercion, operator policy and body-parser behavior.');
+      if(call==='jsonwebtoken.decode' && requestDerived(args[0]))
+        return {...(args[0] || unknown()), jwtDecoded:true, trace:[...(args[0]?.trace || []),trace(file,node,'decode','JWT decoded without verification in this flow')]};
+      if(call==='jsonwebtoken.verify') {
+        const options=args[2],algorithms=options?.props?.get('algorithms');
+        if(options?.props?.get('ignoreExpiration')?.literal===true || options?.props?.get('ignoreNotBefore')?.literal===true || algorithms?.elements?.some(a=>a.literal==='none'))
+          evidence(file,node,'js-jwt-policy','JWT verification policy weakened',ACCESS,unknown([...(args[0]?.trace || []),trace(file,node,'configuration','Explicit JWT verification options')]),
+            'Known JWT verification options disable time checks or permit the none algorithm. Verify token purpose, library version, key selection and effective authentication policy.');
       }
       if (['eval','Function','globalThis.eval','vm.runInContext','vm.runInNewContext','vm.runInThisContext'].includes(call)) {
         evidence(file,node,'js-dynamic-code','Dynamic JavaScript evaluation',INPUT,merge(args),'Dynamic data reaches a JavaScript interpreter.');
@@ -334,7 +467,10 @@ function analyze(parser, input) {
         let target=args[0]||fixed(''); if (target.props?.has('url')) target=target.props.get('url');
         const guardName=node.arguments[0]?.type==='Identifier'?node.arguments[0].name:null;
         const redirect=args[1]?.props?.get('redirect')?.literal;
-        if (guardName && env.get('$guard:'+guardName) && redirect==='error') {
+        if(relativeQuery(target)) {
+          tasks.push(item(file,node,'js-outbound-relative-review','Review relative outbound URL context',SSRF,
+            'A literal single-slash URL prefix confines encoded dynamic terms to its query or fragment. Verify runtime base URL, client URL resolution and redirects; no whole-request safety proof is inferred.',target.trace));
+        } else if (guardName && env.get('$guard:'+guardName) && redirect==='error') {
           const policy=env.get('$guard:'+guardName);
           tasks.push(item(file,node,'js-outbound-control-review','Review URL allowlist control',SSRF,`Exact URL-origin rejection and redirect:error were observed (${policy.originPolicy || 'literal'}). Verify origin configuration provenance, DNS/address handling and platform behavior; this does not prove the request is safe.`,target.trace));
         } else evidence(file,node,'js-outbound-input','Variable URL reaches an outbound client',SSRF,target,'Check allowed origins, DNS/address handling and redirects. A variable URL alone is not SSRF proof.');
@@ -360,11 +496,26 @@ function analyze(parser, input) {
       if (/\.(?:render|renderString)$/.test(call)) evidence(file,node,'js-template-interpreter','Dynamic template selection or source',INPUT,args[0]||fixed(''),'Confirm whether the first argument is interpreted template source or an allowlisted template name; bound context data is distinct.');
       if (['setTimeout','setInterval'].includes(call) && !args[0]?.fn) evidence(file,node,'js-dynamic-code','Potential string timer evaluation',INPUT,args[0]||fixed(''),'Verify whether the timer argument is a string or callable.');
       for (const arg of args) if (arg.fn) invoke(arg.fn,null,stack,node,file);
-      if (call === 'URL') return {...(args[0]||unknown()), url:true,urlKey:file.path+':'+node.start};
-      if (/^(?:String|Number|Boolean|JSON\.stringify|encodeURIComponent)$/.test(call)) return {...merge(args), call:''};
+      if (call === 'URL') return {...(args[0]||unknown()), url:true,urlKey:file.path+':'+node.start,stableURL:file.stable.urls.has(node.start)};
+      if(/^(?:(?:window|globalThis)\.)?document\.(?:getElementById|querySelector|createElement)$/.test(call))
+        return {...unknown([trace(file,node,'source','DOM element values are runtime data')]), domElement:true};
+      if (/^path(?:\.(?:posix|win32))?\.basename$/.test(call)) return {...merge(args), basename:true};
+      if (/^path(?:\.(?:posix|win32))?\.(?:join|resolve)$/.test(call)) {
+        const dynamic=args.filter(arg=>arg.dynamic);
+        return {...merge(args), basenameRooted:typeof args[0]?.literal==='string' && /^(?:\/|[A-Za-z]:[\\/])/.test(args[0].literal) &&
+          dynamic.length>0 && dynamic.every(arg=>arg.basename)};
+      }
+      if (/^(?:String|Number|Boolean|JSON\.stringify|encodeURIComponent)$/.test(call)) return {...merge(args), scalar:true, urlEncoded:call==='encodeURIComponent', call:''};
+      if (/\.collection$/.test(call) || /^(?:mongoose|mongodb)(?:\.|$)/.test(call))
+        return {...merge(args), mongo:true};
+      if (['fetch','globalThis.fetch','axios','axios.get','axios.post','axios.request','http.get','http.request','https.get','https.request'].includes(call))
+        return {...unknown([trace(file,node,'source','Outbound response data; response schema and trust are unresolved')]), networkResponse:true};
+      if(callee.receiverFact?.networkResponse && /\.(?:json|text)$/.test(call))
+        return {...unknown(callee.receiverFact.trace), trace:[...callee.receiverFact.trace,trace(file,node,'call','Response body data')]};
       const propagated=[...args,...(callee.receiverFact ? [callee.receiverFact] : [])];
       return {...merge(propagated.length?propagated:[unknown([trace(file,node,'unresolved',`Unresolved return from ${call || 'call'}`)])]),
-        trace:[...args.flatMap(a=>a.trace||[]),trace(file,node,'call',`Return propagated conservatively through ${call || 'unresolved call'}`)]};
+        ...(callee.receiverFact?.responseKey && /\.(?:status|type|header|set|setHeader)$/.test(call) ? {responseKey:callee.receiverFact.responseKey} : {}),
+        trace:[...propagated.flatMap(a=>a.trace||[]),trace(file,node,'call',`Return propagated conservatively through ${call || 'unresolved call'}`)].slice(-24)};
     }
     if (node.type === 'JSXElement' || node.type === 'JSXFragment') {
       const facts=[];
@@ -423,7 +574,11 @@ function analyze(parser, input) {
         if(expected.trace.some(entry=>entry.kind==='source' && /(?:req|request)\.(?:query|params|body|headers|cookies)|(?:window\.)?location|document\.cookie/.test(entry.detail))) continue;
         policy='runtime-origin-binding requires provenance validation';
       }
-      env.set('$guard:'+left.object.name,{originPolicy:policy});
+      let literalHTTPOrigin=false;
+      if(right.type==='StringLiteral' && /^https?:\/\//.test(right.value)) {
+        try {literalHTTPOrigin=new URL(right.value).origin===right.value;} catch {}
+      }
+      env.set('$guard:'+left.object.name,{originPolicy:policy,literalHTTPOrigin});
     }
   }
   function execute(nodes,env,file,stack,returns) {

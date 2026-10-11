@@ -232,7 +232,7 @@ Run the tooling tests from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-Revision **2026-10-11.1** passed **257 tooling tests** with Babel available. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Tests cover mixed Python/JavaScript scans, credential snapshots and logs, Windows execution, Flask input forms, path/template boundaries and authorization controls.
+Revision **2026-10-11.2** passed **306 tooling tests** with Babel available. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Tests cover mixed Python/JavaScript scans, credential snapshots and logs, Windows execution, Flask input forms, path/template boundaries, authorization controls, JWT/parser settings, filesystem/redirect flows, numeric SQL composition and mutable Map content.
 
 Synthetic reviews found missed issues and false positives. Those cases informed fixes and regression tests; passing them again doesn't establish detection rates for other projects.
 

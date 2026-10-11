@@ -67,6 +67,7 @@ class Project:
         self.rows, self.signals, self.gaps, self.tasks = {}, [], [], []
         self.seen, self.stack, self.summary_cache = set(), [], {}
         self.controls, self.analysis_incomplete = {}, False
+        self.integer_builtin_modified = False
         self.expanded_functions = set()
         self.contexts = self.nodes = 0
         total_bytes = file_count = ast_nodes = 0
@@ -105,20 +106,8 @@ class Project:
         for module, (path, tree) in self.modules.items():
             env = {}
             for node in tree.body:
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        env[alias.asname or alias.name.split(".")[0]] = Value(symbol=alias.name if alias.asname else alias.name.split(".")[0])
-                elif isinstance(node, ast.ImportFrom):
-                    package = module.split(".")[:-1]
-                    if path.replace("\\", "/").endswith("/__init__.py"):
-                        package = module.split(".")
-                    prefix = ".".join(package[:len(package) - node.level + 1]) if node.level else ""
-                    target = ".".join(p for p in (prefix, node.module or "") if p)
-                    for alias in node.names:
-                        if alias.name == "*":
-                            self.issue(self.gaps, path, node, "python-project-import-gap", "Wildcard import is unresolved", "Explicit bindings are required for project call resolution.")
-                        else:
-                            env[alias.asname or alias.name] = Value(symbol=target + "." + alias.name)
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    self.bind_import(node, module, path, env)
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     key = module + "." + node.name
                     env[node.name] = Value(symbol=key)
@@ -129,6 +118,20 @@ class Project:
         # Resolve model declarations only from explicit framework bases; method names alone are insufficient.
         for module, (path, tree) in self.modules.items():
             env = self.globals[module]
+            builtin_names = {name for name, value in env.items() if value.symbol == 'builtins'}
+            setters = {'setattr'} | {name for name, value in env.items() if value.symbol == 'builtins.setattr'}
+            for statement in ast.walk(tree):
+                if isinstance(statement, ast.Import):
+                    builtin_names.update(alias.asname or alias.name for alias in statement.names if alias.name == 'builtins')
+                elif isinstance(statement, ast.ImportFrom) and statement.module == 'builtins' and not statement.level:
+                    setters.update(alias.asname or alias.name for alias in statement.names if alias.name == 'setattr')
+            setters.update(name + '.setattr' for name in builtin_names)
+            for statement in ast.walk(tree):
+                write = isinstance(statement, ast.Attribute) and isinstance(statement.ctx, ast.Store) and statement.attr == 'int' and dotted(statement.value) in builtin_names
+                setter = isinstance(statement, ast.Call) and dotted(statement.func) in setters and len(statement.args) >= 2 and dotted(statement.args[0]) in builtin_names and isinstance(statement.args[1], ast.Constant) and statement.args[1].value == 'int'
+                if write or setter:
+                    self.integer_builtin_modified = True
+                    self.issue(self.gaps, path, statement, 'python-project-builtins-gap', 'Integer builtin may be rebound', 'A supplied builtins.int write or setattr invalidates numeric SQL composition proof across request contexts.')
             bases = set()
             for node in tree.body:
                 if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
@@ -149,6 +152,20 @@ class Project:
 
     def loc(self, path, node):
         return (path, getattr(node, "lineno", None), getattr(node, "col_offset", -1) + 1 if node is not None else None)
+
+    def bind_import(self, node, module, path, env):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                env[alias.asname or alias.name.split('.')[0]] = Value(symbol=alias.name if alias.asname else alias.name.split('.')[0])
+            return
+        package = module.split('.') if path.replace('\\', '/').endswith('/__init__.py') else module.split('.')[:-1]
+        prefix = '.'.join(package[:len(package) - node.level + 1]) if node.level else ''
+        target = '.'.join(p for p in (prefix, node.module or '') if p)
+        for alias in node.names:
+            if alias.name == '*':
+                self.issue(self.gaps, path, node, 'python-project-import-gap', 'Wildcard import is unresolved', 'Explicit bindings are required for project call resolution.')
+            else:
+                env[alias.asname or alias.name] = Value(symbol=target + '.' + alias.name)
 
     def issue(self, collection, path, node, rule, title, detail, value=None, **extra):
         if collection is self.gaps:
@@ -212,7 +229,10 @@ class Project:
     def sql(self, path, node, query, parameters, state):
         raw = query.literal
         if not isinstance(raw, str):
-            if query.origins:
+            if query.symbol == '@numeric-sql-shape' and not self.integer_builtin_modified:
+                # Request provenance survives integer conversion; only SQL text syntax is controlled.
+                self.observe_control(path, node, 'python-sql-composition', True)
+            elif query.origins:
                 self.observe_control(path, node, 'python-sql-composition', False)
                 self.issue(self.signals, path, node, "python-project-sql-injection", "Request data reaches a possible SQL query boundary", "Query text carries request origin. Verify the receiver is a database interpreter, effective controls and query structure; method spelling alone is not database proof.", replace(query, trace=query.trace + (self.loc(path, node),)))
             elif query.symbol == '@fixed-sql-shape':
@@ -248,7 +268,7 @@ class Project:
                 continue
             offset = where.start(1) + match.start(3)
             value = bindings.get(offset, Value())
-            if name in {"id", "pk"} and value.origins:
+            if value.origins and (name in {"id", "pk"} or name in OWNER and name in self.schemas.get(tables[alias].lower(), ())):
                 requested[alias] = value
             if simple and name in OWNER and value.principal == OWNER[name] and not value.origins:
                 scoped.setdefault(alias, set()).add(name)
@@ -375,6 +395,9 @@ class Project:
                 self.issue(self.gaps, path, node, 'python-project-argument-gap', 'Expanded call arguments require review', 'Starred arguments are not a reliable exact parameter binding in this bounded analyzer.')
                 return combine([v for _, v in args] + [self.expr(k.value, state, path) for k in node.keywords])
             value = combine([v for _, v in args] + list(keywords.values()) + [receiver])
+            if target in {'setattr', 'builtins.setattr'} and len(args) >= 2 and args[0][1].symbol == 'builtins' and args[1][1].literal == 'int':
+                self.integer_builtin_modified = True
+                self.issue(self.gaps, path, node, 'python-project-builtins-gap', 'Integer builtin may be rebound', 'A supplied setattr may replace builtins.int; numeric SQL composition controls are withheld.')
             if target in self.functions:
                 return self.call(target, args, keywords, state, path, node)
             name = node.func.attr if isinstance(node.func, ast.Attribute) else ""
@@ -430,19 +453,29 @@ class Project:
             if receiver.symbol in {"@session", '@potential-session'} and name in {"delete", "add"} and args:
                 self.boundary(path, node, args[0][1], state, name)
                 return Value()
-            if target in {"eval", "exec", "os.system", "os.popen", "subprocess.run", "subprocess.call", "subprocess.check_output", "subprocess.check_call", "subprocess.Popen"}:
+            if target in {"eval", "exec", "os.system", "os.popen", "subprocess.run", "subprocess.call", "subprocess.check_output", "subprocess.check_call", "subprocess.Popen", "asyncio.create_subprocess_shell", "asyncio.create_subprocess_exec"}:
                 shell = keywords.get("shell", Value()).literal
-                first = args[0][1] if args else Value()
-                literal_control = isinstance(first.literal, (str, bytes)) and not first.origins
+                first = args[0][1] if args else keywords.get('args', keywords.get('cmd', Value()))
+                process = target.startswith(('subprocess.', 'asyncio.'))
+                interpreter = first
+                shell_boundary = not process or shell is True or target == 'asyncio.create_subprocess_shell'
+                if process and not shell_boundary:
+                    argv = tuple(v for _, v in args) if target == 'asyncio.create_subprocess_exec' else first.items
+                    command = self.shell_command(argv, keywords.get('executable'))
+                    if command is not None:
+                        interpreter, shell_boundary = command, True
+                literal_control = isinstance(interpreter.literal, (str, bytes)) and not interpreter.origins
                 legacy = 'python-dynamic-code' if target in {'eval', 'exec'} else 'python-shell'
                 self.observe_control(path, node, legacy, literal_control)
-                if value.origins and target.startswith("subprocess.") and shell is not True:
-                    self.issue(self.tasks, path, node, "python-project-interpreter-options", "Review request-controlled process arguments", "shell is not proven true; inspect argument and executable selection without assuming shell injection.", value)
-                elif value.origins:
-                    self.issue(self.signals, path, node, "python-project-interpreter-input", "Request data reaches an interpreter", "A bounded local call chain carries request origin to a code/shell boundary; verify sanitization and reachability.", replace(value, trace=value.trace + (self.loc(path, node),)))
+                if process and value.origins and (not shell_boundary or not interpreter.origins):
+                    self.issue(self.tasks, path, node, "python-project-interpreter-options", "Review request-controlled process arguments", "Shell code is fixed or shell execution is not proven; inspect request-controlled argument, environment and executable selection without assuming shell injection.", value)
+                elif interpreter.origins:
+                    self.issue(self.signals, path, node, "python-project-interpreter-input", "Request data reaches an interpreter", "A bounded local call chain carries request origin to a code/shell boundary; verify sanitization and reachability.", replace(interpreter, trace=interpreter.trace + (self.loc(path, node),)))
                 return replace(value, principal='', member='', symbol='')
             if name in {"send", "send_json", "reply"} and value.rows:
                 self.boundary(path, node, value, state, "response")
+            if target in {'int', 'builtins.int'} and 1 <= len(args) <= 2 and not keywords:
+                return replace(value, principal='', member='', symbol='@integer-value')
             transfers = {"str", "int", "float", "dict", "list", "tuple", "json.dumps", "flask.jsonify", "jsonify"}
             if target in transfers or name in {"get", "format", "join", "strip", "encode", "decode"} and receiver.origins:
                 return replace(value, principal="", member="", symbol="")
@@ -458,12 +491,46 @@ class Project:
             return replace(value, principal="", member="", symbol="")
         if isinstance(node, ast.Await):
             return self.expr(node.value, state, path)
+        if isinstance(node, ast.JoinedStr):
+            values = [self.expr(part.value if isinstance(part, ast.FormattedValue) else part, state, path) for part in node.values]
+            formats = [self.expr(part.format_spec, state, path) for part in node.values if isinstance(part, ast.FormattedValue) and part.format_spec is not None]
+            safe = all(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                       or isinstance(part, ast.FormattedValue) and part.format_spec is None and part.conversion == -1
+                       and value.symbol == '@integer-value' for part, value in zip(node.values, values))
+            # Whitespace before an integer prevents its sign joining a fixed '-' into a SQL comment.
+            slots = [i for i, part in enumerate(node.values) if isinstance(part, ast.FormattedValue)]
+            safe = safe and bool(slots) and isinstance(node.values[0], ast.Constant) and bool(re.match(r'\s*(SELECT|UPDATE|DELETE|INSERT)\b', node.values[0].value, re.I))
+            for i in slots:
+                before = node.values[i - 1] if i else None
+                after = node.values[i + 1] if i + 1 < len(node.values) else None
+                safe = safe and isinstance(before, ast.Constant) and bool(before.value) and before.value[-1].isspace()
+                safe = safe and (after is None or isinstance(after, ast.Constant) and bool(after.value) and (after.value[0].isspace() or after.value[0] in ',);'))
+            if safe:
+                return replace(combine(values), symbol='@numeric-sql-shape')
+            return combine(values + formats)
         values = [self.expr(child, state, path) for child in ast.iter_child_nodes(node) if isinstance(child, ast.expr)]
         value = combine(values)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and not value.origins:
             if values and all(isinstance(v.literal, str) or v.symbol in {'@fixed-string-choices', '@fixed-sql-shape'} for v in values):
                 return Value(literal=''.join(v.literal for v in values)) if all(isinstance(v.literal, str) for v in values) else Value(symbol='@fixed-sql-shape')
         return replace(value, rows=frozenset() if isinstance(node, (ast.Compare, ast.BoolOp)) else value.rows)
+
+    @staticmethod
+    def shell_command(argv, executable=None):
+        """Only literal POSIX shell executable/options prove that an argv item is shell code."""
+        if len(argv) < 3:
+            return None
+        program = executable if executable is not None else argv[0]
+        if not isinstance(program.literal, str) or program.origins:
+            return None
+        if program.literal.replace('\\', '/').rsplit('/', 1)[-1] not in {'sh', 'bash', 'dash', 'ash', 'zsh', 'ksh'}:
+            return None
+        for index, option in enumerate(argv[1:], 1):
+            if not isinstance(option.literal, str) or option.origins or not re.fullmatch(r'-[aefilnprstuvxc]+', option.literal) or option.literal.count('c') > 1:
+                return None
+            if 'c' in option.literal[1:]:
+                return argv[index + 1] if index + 1 < len(argv) else None
+        return None
 
     def assign(self, target, value, state):
         if isinstance(target, ast.Name):
@@ -472,6 +539,9 @@ class Project:
             for i, part in enumerate(target.elts):
                 self.assign(part, value.items[i] if i < len(value.items) else Value(), state)
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
+            if self.symbol(target, state) == 'builtins.int':
+                self.integer_builtin_modified = True
+                self.issue(self.gaps, self.stack[-1][2][0] if self.stack else '', target, 'python-project-builtins-gap', 'Integer builtin is rebound', 'A supplied write may replace builtins.int; numeric SQL composition controls are withheld.')
             # Assigning ownership on a selected object invalidates an earlier guard for that object.
             base = self.expr(target.value, state, self.stack[-1][2][0] if self.stack else '')
             field = target.attr if isinstance(target, ast.Attribute) else target.slice.value if isinstance(target.slice, ast.Constant) else None
@@ -610,7 +680,14 @@ class Project:
                     state.env[node.name] = Value(symbol=key)
                     self.globals[key] = dict(state.env)
                     live.append(state)
-                elif isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.Pass)):
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    module = self.stack[-1][0] if self.stack else next((m for m, (p, _) in self.modules.items() if p == path), '')
+                    self.bind_import(node, module, path, state.env)
+                    live.append(state)
+                elif isinstance(node, ast.ClassDef):
+                    state.env[node.name] = Value(symbol=path + ':' + str(node.lineno) + ':' + node.name)
+                    live.append(state)
+                elif isinstance(node, ast.Pass):
                     live.append(state)
                 else:
                     self.issue(self.gaps, path, node, "python-project-control-gap", "Unsupported control flow", f"{type(node).__name__} is outside the bounded branch subset; guards are not inferred through it.")

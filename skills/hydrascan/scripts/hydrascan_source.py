@@ -58,7 +58,8 @@ def inspect_python(text):
         if isinstance(node, ast.Name):
             return dict(env.get(node.id, {"dynamic": True, "call": node.id}))
         if isinstance(node, ast.Constant):
-            return {"dynamic": False, "call": "", "literal": node.value}
+            return {"dynamic": False, "call": "", "literal": node.value,
+                    "text_parts": [node.value] if isinstance(node.value, str) else []}
         if isinstance(node, ast.NamedExpr):
             return facts(node.value, env)
         if isinstance(node, ast.Attribute):
@@ -69,7 +70,7 @@ def inspect_python(text):
             source_fields = {'path', 'args', 'GET', 'POST', 'query_params', 'path_params', 'json', 'form', 'values', 'cookies', 'headers', 'files', 'data', 'body', 'view_args'}
             if (external and name_of(node) == 'self.path' or node.attr in source_fields
                     and (external and name_of(node).startswith('request.') or binding(node.value, env) == 'flask.request')):
-                result.update(dynamic=True, request_input=True, input_line=node.lineno)
+                result.update(dynamic=True, request_input=True, html_input=True, input_line=node.lineno)
             if (external and name_of(node) == 'request.user' or root not in env and name_of(node) in {'current_user.id', 'current_user.pk', 'current_user.tenant_id'}
                     or binding(node, env) == 'flask.g.user'
                     or base.get('principal') and node.attr in {'id', 'pk', 'tenant_id', 'account_id'}):
@@ -94,10 +95,19 @@ def inspect_python(text):
             values = [facts(value, env) for value in node.args] + [facts(value.value, env) for value in node.keywords]
             receiver = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
             flow = combine_flow(values + [receiver])
+            if target in {'flask.request.get_data', 'flask.request.get_json'}:
+                flow.update(request_input=True, html_input=True, input_line=node.lineno)
             if target in {'urllib.parse.urlparse', 'urllib.parse.urlsplit'} and node.args:
                 return {**flow, 'dynamic': True, 'call': '', 'parsed_url': name_of(node.args[0])}
             if target in {'int', 'builtins.int', 'werkzeug.utils.secure_filename'}:
                 return {**flow, 'dynamic': False, 'call': '', 'path_safe_segment': True}
+            if target in {'markupsafe.escape', 'html.escape'} and len(node.args) == 1 and not node.keywords:
+                return {**flow, 'dynamic': True, 'call': '', 'html_input': False, 'html_escaped': True}
+            if target in {'flask.render_template', 'flask.render_template_string'}:
+                # Template-source and explicit Markup checks run at their own
+                # sinks. Rendering data is not raw HTML concatenation evidence.
+                return {**flow, 'dynamic': True, 'call': '', 'html_input': False,
+                        'html_escaped': True, 'text_parts': []}
             if target == 'flask.session.get' and len(node.args) == 1 and not node.keywords and values[0].get('literal') in {'user_id', 'id', 'tenant_id', 'account_id'}:
                 return {'dynamic': True, 'call': '', 'principal': True}
             if isinstance(node.func, ast.Attribute) and node.func.attr == 'get' and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'Authorization':
@@ -120,6 +130,12 @@ def inspect_python(text):
                     flow['owner_access'] = {(location, field) for location in receiver['direct_objects']}
             if target == "tarfile.open":
                 return {"dynamic": False, "call": "", "tar": True}
+            if target == 'zipfile.ZipFile':
+                return {"dynamic": False, "call": "", "zip": True}
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {'namelist', 'infolist'} and receiver.get('zip'):
+                return {'dynamic': True, 'call': '', 'archive_member': True}
+            if target in {'flask.Flask', 'flask.Blueprint'}:
+                return {'dynamic': False, 'call': '', 'flask_app': True}
             if target in {"pathlib.Path", "Path", "os.path.join"} or target.endswith((".joinpath", ".resolve", ".absolute")):
                 base = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
                 if target in {'pathlib.Path', 'Path'} and len(values) == 1 and values[0].get('path'):
@@ -132,10 +148,10 @@ def inspect_python(text):
                         "root_input": base.get('root_input', False) or (target == 'os.path.join' and root_value.get('request_input', False)),
                         "path_segment_dynamic": base.get("path_segment_dynamic", False) or any(value.get("dynamic") for value in values)}
             if target in {"requests.Session", "httpx.Client", "httpx.AsyncClient"}:
-                return {"dynamic": False, "call": target.rsplit(".", 1)[0]}
+                return {"dynamic": False, "call": target.rsplit(".", 1)[0], 'tls_client': True}
             if target.endswith((".format", ".join")):
                 receiver = facts(node.func.value, env) if isinstance(node.func, ast.Attribute) else {}
-                return {"dynamic": receiver.get("dynamic", False) or any(value.get("dynamic") for value in values), "composed": True, "call": ""}
+                return {**combine_flow(values + [receiver]), "dynamic": receiver.get("dynamic", False) or any(value.get("dynamic") for value in values), "composed": True, "call": ""}
             # Safe literal conversion is not evidence for string/query/path containment.
             return {**flow, "dynamic": True, "call": ""}
         children = [facts(child, env) for child in ast.iter_child_nodes(node) if isinstance(child, ast.expr)]
@@ -145,6 +161,8 @@ def inspect_python(text):
             flow['objects'] = set()  # A boolean result is not the fetched record.
         return {**flow, "dynamic": any(child.get("dynamic") for child in children), "call": "",
                 "elements": children if isinstance(node, (ast.Tuple, ast.List, ast.Set)) else None,
+                "mapping": {facts(key, env).get('literal'): facts(value, env) for key, value in zip(node.keys, node.values)
+                            if key is not None and isinstance(facts(key, env).get('literal'), (str, int, bool))} if isinstance(node, ast.Dict) else None,
                 "composed": isinstance(node, (ast.JoinedStr, ast.BinOp)),
                 "path": isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div),
                 "path_root": ast.dump(node.left) if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else None,
@@ -152,7 +170,9 @@ def inspect_python(text):
                 "path_segment_dynamic": path_base.get('path_segment_dynamic', False) or facts(node.right, env).get("dynamic") if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) else False}
 
     def combine_flow(values):
-        result = {key: any(value.get(key) for value in values) for key in ('request_input', 'auth_token')}
+        result = {key: any(value.get(key) for value in values) for key in ('request_input', 'auth_token', 'html_input', 'archive_member')}
+        result['html_escaped'] = any(value.get('html_escaped') for value in values) and all(not value.get('dynamic') or value.get('html_escaped') for value in values)
+        result['text_parts'] = [part for value in values for part in value.get('text_parts', [])][:128]
         # Containing a principal is not the same as being that exact principal.
         result['principal'] = False
         for key in ('objects', 'tampered_objects'):
@@ -326,7 +346,7 @@ def inspect_python(text):
                 emit(node, "python-dynamic-code", "Dynamic code evaluation", INPUT, "Follow the argument into the resolved evaluator, including local aliases.")
             elif target in {"os.system", "os.popen"} or (target.startswith("subprocess.") and literal("shell", True)):
                 emit(node, "python-shell", "Shell interpreter invocation", INPUT, "Establish whether caller-controlled input reaches the shell.")
-            elif target in {"pickle.load", "pickle.loads", "dill.load", "dill.loads", "yaml.unsafe_load"}:
+            elif target in {"pickle.load", "pickle.loads", "dill.load", "dill.loads", "yaml.unsafe_load", 'marshal.load', 'marshal.loads', 'jsonpickle.decode'}:
                 emit(node, "python-deserialization", "Deserialization requiring trusted input", PARSER, "Verify the provenance of serialized data before accepting this signal.")
             elif target == "yaml.load":
                 loader = keywords.get("Loader", node.args[1] if len(node.args) > 1 else None)
@@ -334,6 +354,34 @@ def inspect_python(text):
                     emit(node, "python-yaml-loader", "YAML loader needs configuration review", PARSER, "Resolve the selected loader and callers; a loader's local name is insufficient.")
             elif target == "ssl._create_unverified_context" or (target.startswith(("requests.", "httpx.")) and literal("verify", False)):
                 emit(node, "python-tls-verification", "TLS peer verification disabled", TRANSPORT, "Identify affected transport and protected data.")
+            elif target in {'lxml.etree.XMLParser', 'lxml.etree.ETCompatXMLParser'} and literal('resolve_entities', True):
+                emit(node, 'python-xml-external-entities', 'XML parser explicitly resolves external entities', PARSER,
+                     'Establish whether untrusted XML reaches this exact parser; no_network alone does not block local file entities. Runtime defaults and resolvers require review.')
+            elif target in {'jwt.decode', 'jwt.api_jwt.decode'}:
+                options = facts(keywords.get('options'), env).get('mapping') or {}
+                if options.get('verify_signature', {}).get('literal') is False:
+                    emit(node, 'python-jwt-unverified', 'JWT signature verification explicitly disabled', TRANSPORT,
+                         'Determine whether decoded claims are trusted for identity or permission decisions, or whether the same token was already verified.')
+            elif target in {'hashlib.md5', 'hashlib.sha1'} and env.get('@context', {}).get('security_purpose'):
+                emit(node, 'python-weak-crypto', 'Weak hash used in a security-named operation', TRANSPORT,
+                     'Establish password/signature use; MD5 and SHA-1 are unsuitable for password storage. Nonsecurity checksums may be intentional.')
+            elif target in {'random.choice', 'random.choices', 'random.randint', 'random.randrange', 'random.random', 'random.getrandbits', 'random.randbytes'} and env.get('@context', {}).get('security_purpose'):
+                emit(node, 'python-weak-random', 'Noncryptographic randomness in a security-named operation', TRANSPORT,
+                     'Determine whether output protects a token, session or challenge. Prefer secrets for security material; simulation use is legitimate.')
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == 'run' and facts(node.func.value, env).get('flask_app') and literal('debug', True):
+                emit(node, 'python-debug-exposure', 'Flask development debugger enabled', TRANSPORT,
+                     'Check deployed exposure and entrypoint; the interactive debugger can execute Python and belongs in development only.')
+            elif target in {'flask.redirect', 'django.shortcuts.redirect', 'starlette.responses.RedirectResponse', 'fastapi.responses.RedirectResponse'}:
+                location = node.args[0] if node.args else keywords.get('location', keywords.get('url', keywords.get('to')))
+                if location is not None and facts(location, env).get('dynamic'):
+                    emit(node, 'python-open-redirect', 'Variable destination reaches an HTTP redirect', SSRF,
+                         'Review exact permitted origins and URL normalization, including scheme-relative URLs and backslashes. Variable redirects may be intentional.')
+            elif target == 'markupsafe.Markup' and node.args and facts(node.args[0], env).get('dynamic') and not facts(node.args[0], env).get('html_escaped'):
+                emit(node, 'html-rendering', 'Variable content explicitly marked as trusted HTML', CONTENT,
+                     'Verify the rendering context and data origin; marking text safe disables template escaping, but a caller may already sanitize it.')
+            elif target in {'setattr', 'builtins.setattr'} and len(node.args) == 3 and binding(node.args[0], env) == 'flask_login.current_user' and facts(node.args[1], env).get('request_input'):
+                emit(node, 'python-mass-assignment', 'Request-selected attributes assigned to the authenticated user', AUTH,
+                     'Establish an explicit writable-field policy and model behavior; caller-selected fields can reach privilege or ownership attributes. Middleware and local allowlists still require review.')
             if target in {'flask.render_template_string', 'jinja2.Template', 'jinja2.Environment.from_string'} or target.endswith('.from_string') and target.startswith('jinja2.'):
                 template = node.args[0] if node.args else keywords.get('source', keywords.get('template'))
                 if template is not None and facts(template, env).get('dynamic'):
@@ -374,6 +422,9 @@ def inspect_python(text):
                     if not path.get('dynamic') or checked:
                         continue
                     emit(node, "python-path-input", "Composed input reaches a file operation", FILES, "Verify canonical containment and the exact allowed root before the operation.")
+                    if path.get('archive_member'):
+                        emit(node, 'python-archive-extraction', 'Archive member name reaches a file operation without containment', FILES,
+                             'Manual extraction must validate canonical output paths and links; archive member names are not trusted filesystem paths.')
             if target.startswith(("requests.", "httpx.", "urllib.request.", "aiohttp.")) and target.endswith((".get", ".post", ".put", ".patch", ".delete", ".head", ".options", ".request", ".urlopen")):
                 position = 1 if target.endswith('.request') else 0
                 url = node.args[position] if len(node.args) > position else keywords.get("url")
@@ -387,8 +438,10 @@ def inspect_python(text):
         elif isinstance(target, (ast.Tuple, ast.List)):
             elements = value.get('elements') or []
             for index, element in enumerate(target.elts):
-                bind(element, elements[index] if len(elements) == len(target.elts) else {"dynamic": True, "call": ""}, env)
+                bind(element, elements[index] if len(elements) == len(target.elts) else {**combine_flow([value]), "dynamic": True, "call": ""}, env)
         elif isinstance(target, (ast.Subscript, ast.Attribute)):
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in env and env[target.value.id].get('mapping'):
+                env[target.value.id] = {**env[target.value.id], 'mapping': None}
             field = facts(target.slice, env).get('literal') if isinstance(target, ast.Subscript) else target.attr.lower()
             if field in ownership:
                 objects = facts(target.value, env).get('direct_objects', set())
@@ -399,11 +452,11 @@ def inspect_python(text):
     def merge(env, alternatives):
         for name in set().union(*(scope.keys() for scope in alternatives)):
             values = [scope.get(name, {"dynamic": True, "call": ""}) for scope in alternatives]
-            value = {**combine_flow(values), **{key: any(item.get(key) for item in values) for key in ('dynamic', 'composed', 'path', 'path_segment_dynamic', 'tar')}}
+            value = {**combine_flow(values), **{key: any(item.get(key) for item in values) for key in ('dynamic', 'composed', 'path', 'path_segment_dynamic', 'tar', 'zip', 'flask_app', 'tls_client')}}
             value['principal'] = all(item.get('principal') for item in values)
             value['direct_objects'] = set.intersection(*(set(item.get('direct_objects', set())) for item in values))
             value['normalized'] = all(item.get('normalized') for item in values)
-            for key in ('literal', 'path_root', 'root_version', 'bound_at', 'root_input', 'parsed_url', 'elements'):
+            for key in ('literal', 'path_root', 'root_version', 'bound_at', 'root_input', 'parsed_url', 'elements', 'mapping', 'html_response', 'security_purpose'):
                 if all(key in item and item[key] == values[0].get(key) for item in values):
                     value[key] = values[0][key]
             calls = [item.get('call', '') for item in values]
@@ -435,6 +488,10 @@ def inspect_python(text):
                            and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)
                            and f'<int:{argument.arg}>' in d.args[0].value for d in statement.decorator_list):
                         local[argument.arg].update(dynamic=False, request_input=True, input_line=argument.lineno)
+                local['@context'] = {'security_purpose': bool(re.search(r'(?i)password|passwd|secret|token|nonce|csrf|otp|reset', statement.name)),
+                                     'html_response': any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                                                          and d.func.attr in {'route', 'get', 'post', 'put', 'patch', 'delete'}
+                                                          and facts(d.func.value, env).get('flask_app') for d in statement.decorator_list)}
                 # Include schema-independent authentication context, never infer an authorization defect.
                 auth = any(isinstance(item, ast.Constant) and item.value == 'Authorization'
                            or isinstance(item, ast.Attribute) and name_of(item) in {'request.user', 'request.session'}
@@ -455,6 +512,8 @@ def inspect_python(text):
                     value = facts(statement.value, env)
                     for target in statement.targets if isinstance(statement, ast.Assign) else [statement.target]:
                         check_calls(target, env, guarded, authenticated)
+                        if isinstance(target, ast.Attribute) and target.attr == 'verify' and facts(target.value, env).get('tls_client') and value.get('literal') is False:
+                            emit(target, 'python-tls-verification', 'TLS client peer verification disabled', TRANSPORT, 'Identify affected requests and protected data; unrelated attributes are not TLS policy.')
                         bind(target, value, env)
                         guarded = {item for item in guarded if item[0] != name_of(target) and item[1] != ast.dump(target)}
             elif isinstance(statement, ast.AugAssign):
@@ -525,7 +584,8 @@ def inspect_python(text):
                 check_calls(statement.iter if hasattr(statement, 'iter') else statement.test, env, guarded, authenticated)
                 local = dict(env)
                 if hasattr(statement, 'target'):
-                    bind(statement.target, {"dynamic": True, "call": ""}, local)
+                    iterator = facts(statement.iter, env)
+                    bind(statement.target, {**combine_flow([iterator]), "dynamic": True, "call": ""}, local)
                 body(statement.body, local, guarded, authenticated)
                 body(statement.orelse, dict(env), guarded, authenticated)
                 merge(env, [env.copy(), local])
@@ -533,6 +593,12 @@ def inspect_python(text):
                 check_calls(statement, env, guarded, authenticated)
                 if isinstance(statement, ast.Return) and statement.value is not None:
                     disclosure(statement.value, env, guarded, authenticated)
+                    value = facts(statement.value, env)
+                    parts = ''.join(value.get('text_parts', []))
+                    unsafe_context = bool(re.search(r'(?i)<(?:script|style)\b|\bon\w+\s*=|=', parts))
+                    if env.get('@context', {}).get('html_response') and '<' in parts and value.get('request_input') and (value.get('html_input') or unsafe_context):
+                        emit(statement.value, 'html-rendering', 'Request content reaches a Flask HTML response', CONTENT,
+                             'Verify content type and browser context. HTML escaping protects text nodes but does not establish safety in script, style or URL attributes.')
     body(tree.body, {})
     candidate_positions = {(item['line'], item['column']) for item in signals if item['rule'] == 'python-object-authorization'}
     tasks = [item for item in tasks if (item['line'], item['column']) not in candidate_positions]

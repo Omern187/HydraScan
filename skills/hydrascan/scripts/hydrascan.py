@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import unquote, urlsplit
 
-VERSION = "2026-10-11.1"
+VERSION = "2026-10-11.2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hydrascan_source import inspect_python
@@ -172,13 +172,15 @@ def analyze(root, files, *, node=None, js_parser_root=None):
         for signal in signals:
             add(path, signal)
         # Never record matched credentials or code excerpts.
-        if suffix in {'.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.properties'} or Path(path).name == 'Dockerfile':
+        if suffix in {'.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.properties', '.sh', '.ps1'} or Path(path).name in {'Dockerfile', 'Containerfile'}:
             credential_values = credentials(text, python=suffix == '.py')
             for value, line in credential_values:
                 if not isinstance(value, str) or len(value) < 12:
                     continue
                 if value.startswith(('${', '{{', '<')) or re.search(r'(?i)example|placeholder|your[_-]|changeme', value):
                     continue
+                if re.search(r'(?i)^(?:(?:enter|paste|type)\b.*\b(?:password|key|token)\b|(?:password|api key|token)\s+(?:is required|must be|should be))', value):
+                    continue  # UI prompts are not authentication material.
                 add(path, {"line": line, "rule": "embedded-credential",
                            "title": "Possible embedded credential (value withheld)", "family": PRIVACY,
                            "method": "literal triage", "detail": "Establish whether this is a credential and who can obtain it; never test it against an unrelated service."})
@@ -220,7 +222,17 @@ def analyze(root, files, *, node=None, js_parser_root=None):
 
 def credentials(text, *, python=False):
     """Withhold values from artifacts; valid Python uses AST to avoid quoted examples."""
-    names = r'(?i)(?:\w+[_-])?(?:api[_-]?key|access[_-]?token|password|client[_-]?secret|auth[_-]?token|private[_-]?key|secret|token)'
+    names = r'(?i)(?:[\w.-]+[_-])?(?:api[_-]?key|access[_-]?token|password|client[_-]?secret|auth[_-]?token|private[_-]?key|secret[_-]?key|secret[_-]?access[_-]?key|signing[_-]?key|secret|token)'
+    def embedded(value):
+        if not isinstance(value, str):
+            return False
+        if re.search(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----', value):
+            return True
+        try:
+            parsed = urlsplit(value)
+            return bool(parsed.scheme and parsed.hostname and parsed.password and len(unquote(parsed.password)) >= 8)
+        except ValueError:
+            return False
     if python:
         try:
             tree = ast.parse(text)
@@ -229,6 +241,8 @@ def credentials(text, *, python=False):
         if tree is not None:
             values = []
             for item in ast.walk(tree):
+                if isinstance(item, ast.Constant) and embedded(item.value):
+                    values.append((item.value, item.lineno))
                 targets = []
                 if isinstance(item, (ast.Assign, ast.AnnAssign)):
                     targets = item.targets if isinstance(item, ast.Assign) else [item.target]
@@ -241,11 +255,21 @@ def credentials(text, *, python=False):
                     for key, value in zip(item.keys, item.values):
                         if isinstance(key, ast.Constant) and isinstance(key.value, str) and re.fullmatch(names, key.value) and isinstance(value, ast.Constant):
                             values.append((value.value, value.lineno))
-            return values
+            return list(dict.fromkeys(values))
     # In malformed Python, only assignment-shaped lines are trusted as lexical candidates.
     prefix = r'''(?im)^\s*["']?''' if python else r'(?i)\b'
     expression = prefix + names.replace('(?i)', '') + r'''["']?\s*[:=]\s*["']([^"'\r\n]{12,})["']'''
-    return [(match.group(1), text.count('\n', 0, match.start()) + 1) for match in re.finditer(expression, text)]
+    values = [(match.group(1), text.count('\n', 0, match.start()) + 1) for match in re.finditer(expression, text)
+              if not text[text.rfind('\n', 0, match.start()) + 1:match.start()].lstrip().startswith(('#', '//', ';'))]
+    if not python:
+        # Bare values in configuration and shell assignments; never treat a call,
+        # interpolation or UI sentence as a literal credential.
+        bare = r'''(?im)^\s*(?:-\s+|export\s+|ENV\s+)?[\w.-]*?(''' + names.replace('(?i)', '') + r''')\s*[:=]\s*([^\s"'#$;{}()]+)\s*(?:[#;].*)?$'''
+        values.extend((match.group(2), text.count('\n', 0, match.start()) + 1) for match in re.finditer(bare, text))
+        for match in re.finditer(r'''["']([^"'\r\n]+)["']''', text):
+            if embedded(match.group(1)) and not text[text.rfind('\n', 0, match.start()) + 1:match.start()].lstrip().startswith(('#', '//')):
+                values.append((match.group(1), text.count('\n', 0, match.start()) + 1))
+    return list(dict.fromkeys(values))
 
 
 def snapshot_changes(root, files):
