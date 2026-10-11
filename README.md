@@ -159,7 +159,7 @@ The CLI prepares material for review. It doesn't start AI agents or complete a s
 <details>
 <summary><strong>Optional: JavaScript / TypeScript AST analysis</strong></summary>
 
-Install the pinned Babel parser separately from the app being reviewed. The parser manifest requires **Node `^22.18.0 || >=24.11.0`**.
+Install the pinned **Babel parser 8.0.7** separately from the app being reviewed. The parser manifest requires **Node `^22.18.0 || >=24.11.0`**.
 
 ```sh
 npm ci --prefix skills/hydrascan/scripts/javascript-parser
@@ -205,15 +205,17 @@ A run saves these files, along with the snapshot and supporting metadata:
 hydrascan-run/
 ├── report.md                    Summary and agent review notes
 ├── review-state.md              Saved state for continuing the review
-├── coverage.json                Checked and unfinished risk categories
+├── coverage.json                Preliminary coverage and remaining work
 ├── candidates.json              Possible issues that need review
-├── security-review-tasks.json   Open ownership and permission questions
+├── security-review-tasks.json   Open control, trust and policy questions
 ├── analysis-gaps.json           Unsupported or failed analysis
 ├── inventory.json               Included and excluded source files
 └── checks.json                  Results of selected test commands
 ```
 
-A finding includes the affected code, expected and observed behavior, impact, and how it was checked. Its status tells you what evidence is available:
+The CLI starts coverage at `not-started` or `partial`. Reviewers add evidence before marking a category as checked.
+
+Reviewer findings include the affected code, expected and observed behavior, impact, and how each issue was checked. Their status tells you what evidence is available:
 
 | Status | Meaning |
 | --- | --- |
@@ -232,7 +234,9 @@ Run the tooling tests from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-Revision **2026-10-11.2** passed **306 tooling tests** with Babel available. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Tests cover mixed Python/JavaScript scans, credential snapshots and logs, Windows execution, Flask input forms, path/template boundaries, authorization controls, JWT/parser settings, filesystem/redirect flows, numeric SQL composition and mutable Map content.
+Revision **2026-10-11.2** passed **306 tooling tests**, with no skips, on Windows using Python 3.12.14 and Babel parser 8.0.7. These check HydraScan's runner and analysis, not the security of another app. AST-specific test classes are skipped when the optional parser isn't installed. Tests cover mixed Python/JavaScript scans, credential snapshots and logs, Windows execution, Flask input forms, path/template boundaries, authorization controls, JWT/parser settings, filesystem/redirect flows, numeric SQL composition and mutable Map content.
+
+Claude compatibility checks cover the skill format, copied installation layout and CLI commands. Full reviews invoked through Claude Code or Claude's custom-skill uploader have not been tested end to end here. [Host verification details](skills/hydrascan/references/hosts.md#verification-and-sources)
 
 Synthetic reviews found missed issues and false positives. Those cases informed fixes and regression tests; passing them again doesn't establish detection rates for other projects.
 
@@ -254,7 +258,7 @@ Synthetic reviews found missed issues and false positives. Those cases informed 
 
 Use HydraScan on code and systems you're authorized to test. Prefer local instances or staging with synthetic data. Production changes, additional hosts, paid runs and external reporting need their own authorization.
 
-The source snapshot skips links, dependency/Git directories, known secret files, binaries and oversized files. Check the inventory for exclusions. Included code may still contain secrets; review reports before sharing them and keep raw logs private.
+The source snapshot skips links, dependency/Git directories, known secret files, binaries and oversized files. Check the inventory for exclusions. Included code may still contain secrets; review reports before sharing them and keep snapshots and diagnostic logs private. Log redaction is best effort.
 
 The runner doesn't automatically install app dependencies, run discovered commands, scan HTTP targets, call model providers or upload source. Your coding agent can add authorized local or staging checks to the assessment. HydraScan doesn't guarantee discovery of every vulnerability or certify compliance.
 
